@@ -1,12 +1,16 @@
-use clap::{Parser, Subcommand, builder::Str};
-use env_logger;
+use clap::{Parser, Subcommand};
 use log::{error, info};
 use notify::Watcher;
 use std::path::PathBuf;
 use tower_livereload::LiveReloadLayer;
 
-use axum::Router;
-use tokio::sync::broadcast;
+use axum::{
+    Router,
+    extract::Path,
+    http::StatusCode,
+    response::{Html, Redirect},
+    routing::get,
+};
 
 use lib::{
     PageContext, TemplateEngine, parse_md,
@@ -21,7 +25,7 @@ use lib::{
 };
 
 #[derive(Parser)]
-#[command(about = "Static site tools")]
+#[command(about = "ssg")]
 struct Args {
     #[command(subcommand)]
     command: Commands,
@@ -60,11 +64,110 @@ enum Commands {
     },
 }
 
+async fn render_markdown(
+    content: String,
+    templates: &PathBuf,
+    template_name: &str,
+) -> anyhow::Result<String> {
+    let (frontmatter, md_content) = parse_md(&content)?;
+    let mut ast = to_ast(md_content.to_string());
+
+    let mut reading_pipeline = PluginPipeline::<ReadingTimeContext>::new();
+    reading_pipeline.register(Plugin {
+        kind: NodeKind::Text,
+        func: reading_time_plugin,
+    });
+
+    let mut toc_pipeline = PluginPipeline::<TocContext>::new();
+    toc_pipeline.register(Plugin {
+        kind: NodeKind::Heading,
+        func: toc_plugin,
+    });
+
+    let mut highlighting_pipeline = PluginPipeline::<()>::new();
+    highlighting_pipeline.register(Plugin {
+        kind: NodeKind::Code,
+        func: highlight_plugin,
+    });
+
+    run_pipelines!(
+        &mut ast,
+        reading_pipeline,
+        toc_pipeline,
+        highlighting_pipeline
+    );
+
+    let content_html = render(&ast);
+
+    let page_ctx = PageContext {
+        frontmatter,
+        content: content_html.clone(),
+        ast: ast.clone(),
+    };
+
+    let template_engine = TemplateEngine::new(templates)?;
+
+    let rendered = render_template!(template_engine, template_name, None, page => page_ctx, reading => reading_pipeline.context, toc => toc_pipeline.context)?;
+
+    Ok(rendered)
+}
+
+pub async fn render_path_handler(
+    path: String,
+    templates: PathBuf,
+    template: String,
+    watch_dir: PathBuf,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let mut requested = path.trim_matches('/').to_string();
+
+    if requested.ends_with(".html") {
+        let base_name = requested.trim_end_matches(".html");
+        requested = format!("{}.md", base_name);
+    }
+
+    let base = if requested.is_empty() {
+        watch_dir.clone()
+    } else {
+        watch_dir.join(&requested)
+    };
+
+    let content = if base.is_dir() {
+        let idx_md = base.join("index.md");
+        if idx_md.is_file() {
+            std::fs::read_to_string(&idx_md)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("index not found in directory: {}", base.display()),
+            ))
+        }
+    } else if base.is_file() {
+        std::fs::read_to_string(&base)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("file not found: {}", requested),
+        ))
+    }
+    .map_err(|e| (StatusCode::NOT_FOUND, format!("Failed to read file: {}", e)))?;
+
+    let rendered = render_markdown(content, &templates, &template)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to render: {}", e),
+            )
+        })?;
+
+    Ok(Html(rendered))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    tracing_subscriber::fmt::init();
 
     match args.command {
         Commands::Build {
@@ -79,8 +182,6 @@ async fn main() -> anyhow::Result<()> {
             }
 
             std::fs::create_dir_all(&output_dir)?;
-
-            let template_engine = TemplateEngine::new(&templates)?;
 
             for entry in std::fs::read_dir(&input_dir)? {
                 let entry = entry?;
@@ -103,54 +204,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                let (frontmatter, content) = match parse_md(&raw) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        error!("failed to parse frontmatter for {}: {}", path.display(), e);
-                        continue;
-                    }
-                };
-
-                let mut ast = to_ast(content.to_string());
-
-                let mut reading_pipeline = PluginPipeline::<ReadingTimeContext>::new();
-                reading_pipeline.register(Plugin {
-                    kind: NodeKind::Text,
-                    func: reading_time_plugin,
-                });
-
-                let mut toc_pipeline = PluginPipeline::<TocContext>::new();
-                toc_pipeline.register(Plugin {
-                    kind: NodeKind::Heading,
-                    func: toc_plugin,
-                });
-
-                let mut highlighting_pipeline = PluginPipeline::<()>::new();
-                highlighting_pipeline.register(Plugin {
-                    kind: NodeKind::Code,
-                    func: highlight_plugin,
-                });
-
-                run_pipelines!(
-                    &mut ast,
-                    reading_pipeline,
-                    toc_pipeline,
-                    highlighting_pipeline
-                );
-
-                let content_html = render(&ast);
-
-                let page_ctx = PageContext {
-                    frontmatter,
-                    content: content_html.clone(),
-                    ast: ast.clone(),
-                };
-
-                let rendered = match render_template!(template_engine, &template, None, page => page_ctx, reading => reading_pipeline.context, toc => toc_pipeline.context)
-                {
+                let rendered = match render_markdown(raw, &templates, &template).await {
                     Ok(s) => s,
                     Err(e) => {
-                        error!("template render error for {}: {}", path.display(), e);
+                        error!("failed to render {}: {}", path.display(), e);
                         continue;
                     }
                 };
@@ -177,7 +234,20 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let livereload = LiveReloadLayer::new();
             let reloader = livereload.reloader();
-            let app = Router::new().layer(livereload);
+
+            let watch_dir_route = watch_dir.clone();
+            let templates_route = templates.clone();
+
+            let app = Router::new()
+                .route("/", get(|| async { Redirect::permanent("/index.html") }))
+                .route(
+                    "/{*path}",
+                    get(async move |Path(path): Path<String>| {
+                        render_path_handler(path, templates_route, template, watch_dir_route).await
+                    }),
+                )
+                .layer(tower_http::trace::TraceLayer::new_for_http())
+                .layer(livereload);
 
             let mut watcher = notify::recommended_watcher(move |ev: Result<_, _>| {
                 if ev.is_ok_and(|evt: notify::Event| !evt.kind.is_access()) {
@@ -185,6 +255,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             })?;
             watcher.watch(&watch_dir, notify::RecursiveMode::Recursive)?;
+            watcher.watch(&templates, notify::RecursiveMode::Recursive)?;
 
             let addr = format!("{}:{}", host, port);
             info!("listening on http://{}", addr);
