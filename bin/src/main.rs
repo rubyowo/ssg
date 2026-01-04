@@ -16,6 +16,7 @@ use lib::{
     PageContext, TemplateEngine, parse_md,
     plugin::{
         NodeKind, Plugin,
+        math::math_plugin,
         pipeline::PluginPipeline,
         reading_time::{ReadingTimeContext, reading_time_plugin},
         syntax_highlighting::highlight_plugin,
@@ -90,11 +91,22 @@ async fn render_markdown(
         func: highlight_plugin,
     });
 
+    let mut math_pipeline = PluginPipeline::<()>::new();
+    math_pipeline.register(Plugin {
+        kind: NodeKind::Code,
+        func: math_plugin,
+    });
+    math_pipeline.register(Plugin {
+        kind: NodeKind::InlineMath,
+        func: math_plugin,
+    });
+
     run_pipelines!(
         &mut ast,
         reading_pipeline,
         toc_pipeline,
-        highlighting_pipeline
+        highlighting_pipeline,
+        math_pipeline
     );
 
     let content_html = render(&ast);

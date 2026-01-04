@@ -2,6 +2,7 @@ pub mod pipeline;
 pub mod reading_time;
 pub mod toc;
 pub mod syntax_highlighting;
+pub mod math;
 
 use markdown::mdast::Node;
 
@@ -66,6 +67,7 @@ define_mdast_nodes! {
         Text,
         Code,
         InlineCode,
+        InlineMath,
         Image,
         Html,
         Break,

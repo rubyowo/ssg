@@ -18,3 +18,11 @@ println!("holy shit we have highlighting??")
 ```
 
 $$ \frac{n!}{k!(n-k)!} $$
+
+```math
+a^2 + b^2 = c^2
+```
+
+```math
+(n + 1)! = \Gamma ( n + 1 )
+```
