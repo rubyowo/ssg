@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use log::{error, info};
+use minify_html::{Cfg, minify};
 use notify::Watcher;
 use std::path::PathBuf;
 use tower_livereload::LiveReloadLayer;
@@ -224,10 +225,24 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
+                let mut cfg = Cfg::new();
+                cfg.enable_possibly_noncompliant();
+                cfg.minify_css = true;
+                cfg.minify_js = true;
+
+                let minified = minify(rendered.as_bytes(), &cfg);
+                let minified: &str = match str::from_utf8(&minified) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("failed to minify {}: {}", path.display(), e);
+                        continue;
+                    }
+                };
+
                 let out_name = format!("{}.html", filename);
                 let out_path = output_dir.join(out_name);
 
-                if let Err(e) = std::fs::write(&out_path, rendered) {
+                if let Err(e) = std::fs::write(&out_path, minified) {
                     error!("failed to write {}: {}", out_path.display(), e);
                 } else {
                     info!("wrote {}", out_path.display());

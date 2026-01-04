@@ -323,6 +323,7 @@ dependencies = [
  "clap",
  "lib",
  "log",
+ "minify-html",
  "notify",
  "tokio",
  "tower-http",
@@ -1102,7 +1103,6 @@ dependencies = [
  "markdown-frontmatter",
  "math-core",
  "mdast_util_to_markdown",
- "minify-html-onepass",
  "serde",
  "serde_json",
  "tera",
@@ -1249,25 +1249,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "minify-html-common"
-version = "0.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53c3d71ae301c4e36949937ed9d121e1bf6847f2dc69ec20929b379d14659aac"
-dependencies = [
- "ahash 0.8.12",
- "aho-corasick",
- "itertools 0.14.0",
- "memchr",
- "once_cell",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "minify-html-onepass"
+name = "minify-html"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dce1cd3c524c89ba96da5e4e19f6eee49fd063795cf273c21608482d6839eaf"
+checksum = "644c1511457e5f70dcbc03c932d4bd26351eceb8657b119c919dde2e65b6d120"
 dependencies = [
  "ahash 0.8.12",
  "aho-corasick",
@@ -1280,6 +1265,21 @@ dependencies = [
  "oxc_minifier",
  "oxc_parser",
  "oxc_span",
+]
+
+[[package]]
+name = "minify-html-common"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c3d71ae301c4e36949937ed9d121e1bf6847f2dc69ec20929b379d14659aac"
+dependencies = [
+ "ahash 0.8.12",
+ "aho-corasick",
+ "itertools 0.14.0",
+ "memchr",
+ "once_cell",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
