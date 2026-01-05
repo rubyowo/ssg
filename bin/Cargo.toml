@@ -15,3 +15,5 @@ clap = { version = "4", features = ["derive"] }
 log = "0.4"
 tracing-subscriber = "0.3"
 minify-html = "0.18"
+toml = "0.9"
+serde = { version = "1.0", features = ["derive"] }
