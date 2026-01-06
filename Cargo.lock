@@ -115,7 +115,7 @@ dependencies = [
  "arborium-javascript",
  "arborium-python",
  "arborium-rust",
- "arborium-theme",
+ "arborium-theme 2.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "arborium-tree-sitter",
  "arborium-typescript",
  "dlmalloc",
@@ -138,7 +138,7 @@ version = "2.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "273bc26ef40c8aeb4b92f33cd24659d14fc37ddbf148949f4daa096da80b2eee"
 dependencies = [
- "arborium-theme",
+ "arborium-theme 2.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "arborium-tree-sitter",
  "streaming-iterator",
 ]
@@ -201,9 +201,16 @@ dependencies = [
 
 [[package]]
 name = "arborium-theme"
-version = "2.4.7"
+version = "2.6.0"
+dependencies = [
+ "phf 0.13.1",
+]
+
+[[package]]
+name = "arborium-theme"
+version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d9309f391a94a3f049a9ae4d025f4e4e026997b2a91050b9dfe0bcfe14bd60f"
+checksum = "3800aeb6bb75bb6cb9471c9b845e0a29d58f8a18890f1f248c1c6954d9ea5d8e"
 
 [[package]]
 name = "arborium-tree-sitter"
@@ -319,6 +326,7 @@ name = "bin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arborium-theme 2.6.0",
  "axum",
  "clap",
  "lib",

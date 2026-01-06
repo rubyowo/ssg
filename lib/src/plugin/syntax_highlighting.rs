@@ -1,5 +1,6 @@
 use arborium::Highlighter;
 use markdown::mdast::Node;
+use serde::Serialize;
 
 use crate::NodeExt;
 
@@ -20,4 +21,10 @@ pub fn highlight_plugin(node: &mut Node, _ctx: &mut ()) {
             }
         }
     }
+}
+
+#[derive(Serialize, Debug)]
+pub struct HighlighterThemeContext {
+    pub themes: Vec<String>,
+    pub css: String
 }

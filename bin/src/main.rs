@@ -23,11 +23,13 @@ use lib::{
         math::math_plugin,
         pipeline::PluginPipeline,
         reading_time::{ReadingTimeContext, reading_time_plugin},
-        syntax_highlighting::highlight_plugin,
+        syntax_highlighting::{HighlighterThemeContext, highlight_plugin},
         toc::{TocContext, toc_plugin},
     },
     render, render_template, run_pipelines, to_ast,
 };
+
+use crate::config::Config;
 
 #[derive(Parser)]
 #[command(about = "ssg")]
@@ -47,7 +49,7 @@ enum Commands {
         #[arg(short = 'T', long, default_value = "templates")]
         templates: PathBuf,
 
-        #[arg(short, long, default_value = "test.tera")]
+        #[arg(short, long, default_value = "index.tera")]
         template: String,
     },
 
@@ -58,7 +60,7 @@ enum Commands {
         #[arg(short = 'T', long, default_value = "templates")]
         templates: PathBuf,
 
-        #[arg(short, long, default_value = "test.tera")]
+        #[arg(short, long, default_value = "index.tera")]
         template: String,
 
         #[arg(long, default_value = "127.0.0.1")]
@@ -73,6 +75,7 @@ async fn render_markdown(
     content: String,
     templates: &PathBuf,
     template_name: &str,
+    config: Config,
 ) -> anyhow::Result<String> {
     let (frontmatter, md_content) = parse_md(&content)?;
     let mut ast = to_ast(md_content.to_string());
@@ -121,9 +124,22 @@ async fn render_markdown(
         ast: ast.clone(),
     };
 
+    let themes: Vec<String> = config
+        .highlighting_themes
+        .unwrap_or(vec!["catppuccin mocha".to_string()])
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    let css: String = arborium_theme::builtin::all()
+        .iter()
+        .filter(|theme| themes.contains(&theme.name.to_lowercase()))
+        .map(|theme| theme.to_css("pre"))
+        .collect();
+    let hl_context = HighlighterThemeContext { themes, css };
+
     let template_engine = TemplateEngine::new(templates)?;
 
-    let rendered = render_template!(template_engine, template_name, None, page => page_ctx, reading => reading_pipeline.context, toc => toc_pipeline.context)?;
+    let rendered = render_template!(template_engine, template_name, None, page => page_ctx, reading => reading_pipeline.context, toc => toc_pipeline.context, highlighter => hl_context)?;
 
     Ok(rendered)
 }
@@ -147,16 +163,17 @@ pub async fn render_path_handler(
         base.clone()
     };
 
-    let (templates_override, template_override) = config::load_overrides(&md_path, &watch_dir)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load config: {}", e),
-            )
-        })?;
+    let config = config::load_overrides(&md_path, &watch_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load config: {}", e),
+        )
+    })?;
 
-    let final_templates = templates_override.unwrap_or(templates.clone());
-    let final_template = template_override.unwrap_or(template.clone());
+    let config_cloned = config.clone();
+
+    let final_templates = config_cloned.templates.unwrap_or(templates.clone());
+    let final_template = config_cloned.template.unwrap_or(template.clone());
 
     let content = if md_path.is_file() {
         std::fs::read_to_string(&md_path)
@@ -168,7 +185,7 @@ pub async fn render_path_handler(
     }
     .map_err(|e| (StatusCode::NOT_FOUND, format!("Failed to read file: {}", e)))?;
 
-    let rendered = render_markdown(content, &final_templates, &final_template)
+    let rendered = render_markdown(content, &final_templates, &final_template, config)
         .await
         .map_err(|e| {
             (
@@ -239,17 +256,17 @@ async fn main() -> anyhow::Result<()> {
                     None => continue,
                 };
 
-                let (templates_override, template_override) =
-                    match config::load_overrides(&path, &input_dir) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!("failed to load config for {}: {}", path.display(), e);
-                            (None, None)
-                        }
-                    };
+                let config = match config::load_overrides(&path, &input_dir) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("failed to load config for {}: {}", path.display(), e);
+                        Config::default()
+                    }
+                };
 
-                let final_templates = templates_override.unwrap_or(templates.clone());
-                let final_template = template_override.unwrap_or(template.clone());
+                let config_cloned = config.clone();
+                let final_templates = config_cloned.templates.unwrap_or(templates.clone());
+                let final_template = config_cloned.template.unwrap_or(template.clone());
 
                 let raw = match std::fs::read_to_string(&path) {
                     Ok(s) => s,
@@ -259,13 +276,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                let rendered = match render_markdown(raw, &final_templates, &final_template).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("failed to render {}: {}", path.display(), e);
-                        continue;
-                    }
-                };
+                let rendered =
+                    match render_markdown(raw, &final_templates, &final_template, config).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!("failed to render {}: {}", path.display(), e);
+                            continue;
+                        }
+                    };
 
                 let mut cfg = Cfg::new();
                 cfg.enable_possibly_noncompliant();

@@ -7,33 +7,51 @@ use std::path::{Path, PathBuf};
 pub struct TomlConfig {
     pub templates: Option<String>,
     pub template: Option<String>,
+    pub highlighting_themes: Option<Vec<String>>
 }
 
-fn read_file(toml: PathBuf) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
-    let s = fs::read_to_string(&toml).with_context(|| format!("reading {}", toml.display()))?;
-    let cfg: TomlConfig =
-        toml::from_str(&s).with_context(|| format!("parsing {}", toml.display()))?;
+#[derive(Clone, Debug, Default)]
+pub struct Config {
+    pub templates: Option<PathBuf>,
+    pub template: Option<String>,
+    pub highlighting_themes: Option<Vec<String>>
+}
 
-    let templates_resolved = cfg.templates.map(|t| {
-        let p = PathBuf::from(t);
-        if p.is_absolute() {
-            p
-        } else {
-            let parent = toml
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf();
-            parent.join(&p).canonicalize().with_context(|| format!("reading {}", p.display())).unwrap()
-        }
-    });
+impl Config {
+    pub fn new(toml: PathBuf) -> anyhow::Result<Self> {
+        let s = fs::read_to_string(&toml).with_context(|| format!("reading {}", toml.display()))?;
+        let cfg: TomlConfig =
+            toml::from_str(&s).with_context(|| format!("parsing {}", toml.display()))?;
 
-    Ok((templates_resolved, cfg.template))
+        let templates_resolved = cfg.templates.map(|t| {
+            let p = PathBuf::from(t);
+            if p.is_absolute() {
+                p
+            } else {
+                let parent = toml
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf();
+                parent
+                    .join(&p)
+                    .canonicalize()
+                    .with_context(|| format!("reading {}", p.display()))
+                    .unwrap()
+            }
+        });
+
+        Ok(Self {
+            templates: templates_resolved,
+            template: cfg.template,
+            highlighting_themes: cfg.highlighting_themes
+        })
+    }
 }
 
 pub fn load_overrides(
     md_path: &Path,
     watch_dir: &Path,
-) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
+) -> anyhow::Result<Config> {
     let dir = if md_path.is_dir() {
         md_path.to_path_buf()
     } else {
@@ -56,14 +74,14 @@ pub fn load_overrides(
     if let Some(stem) = &stem_opt {
         let page_toml = dir.join(format!("{}.toml", stem));
         if page_toml.is_file() {
-            return read_file(page_toml);
+            return Config::new(page_toml);
         }
     }
 
     let index_toml = dir.join("index.toml");
     if index_toml.is_file() {
-        return read_file(index_toml);
+        return Config::new(index_toml);
     }
 
-    Ok((None, None))
+    Ok(Config::default())
 }
