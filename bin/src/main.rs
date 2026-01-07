@@ -1,18 +1,23 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
-use log::{error, info};
+use log::{error, info, warn};
 use minify_html::{Cfg, minify};
 use notify::Watcher;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
+
+use tokio::sync::Mutex;
 
 use tower_livereload::LiveReloadLayer;
 
 mod config;
+mod glob;
 
 use axum::{
     Router,
-    extract::Path,
-    http::StatusCode,
-    response::{Html, Redirect},
+    body::Body,
+    extract::{Path, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
 
@@ -29,7 +34,7 @@ use lib::{
     render, render_template, run_pipelines, to_ast,
 };
 
-use crate::config::Config;
+use crate::{config::Config, glob::GlobCache};
 
 #[derive(Parser)]
 #[command(about = "ssg")]
@@ -71,13 +76,22 @@ enum Commands {
     },
 }
 
+#[derive(Clone)]
+pub struct WebState {
+    pub templates: PathBuf,
+    pub template: String,
+    pub watch_dir: PathBuf,
+    pub glob_cache: Arc<Mutex<GlobCache>>,
+}
+
 async fn render_markdown(
     content: String,
     templates: &PathBuf,
     template_name: &str,
     config: Config,
 ) -> anyhow::Result<String> {
-    let (frontmatter, md_content) = parse_md(&content)?;
+    let (frontmatter, md_content) =
+        parse_md(&content).with_context(|| format!("Failed to parse frontmatter: {}", content))?;
     let mut ast = to_ast(md_content.to_string());
 
     let mut reading_pipeline = PluginPipeline::<ReadingTimeContext>::new();
@@ -124,56 +138,71 @@ async fn render_markdown(
         ast: ast.clone(),
     };
 
-    let themes: Vec<String> = config
-        .highlighting_themes
-        .unwrap_or(vec!["catppuccin mocha".to_string()])
+    let themes: Vec<String> = config.highlighting_themes.unwrap_or_else(|| {
+        vec![
+            "catppuccin_mocha".to_string(),
+            "catppuccin_latte".to_string(),
+        ]
+    });
+
+    let themes_css: String = themes
         .iter()
-        .map(|s| s.to_lowercase())
+        .filter_map(|theme| match arborium_theme::builtin::THEMES.get(theme) {
+            Some(theme_fn) => Some(theme_fn().to_css("pre")),
+            None => {
+                warn!("Unknown highlighting theme: {theme}");
+                None
+            }
+        })
         .collect();
-    let css: String = arborium_theme::builtin::all()
-        .iter()
-        .filter(|theme| themes.contains(&theme.name.to_lowercase()))
-        .map(|theme| theme.to_css("pre"))
-        .collect();
+
+    let base_css = arborium_theme::theme::generate_base_css();
+
+    let css = base_css + &themes_css;
+
     let hl_context = HighlighterThemeContext { themes, css };
 
     let template_engine = TemplateEngine::new(templates)?;
 
-    let rendered = render_template!(template_engine, template_name, None, page => page_ctx, reading => reading_pipeline.context, toc => toc_pipeline.context, highlighter => hl_context)?;
+    let rendered = render_template!(template_engine, template_name, None, page => page_ctx, reading => reading_pipeline.context, toc => toc_pipeline.context, highlighter => hl_context).with_context(|| format!("Failed to render tera template: {}", content))?;
 
     Ok(rendered)
 }
 
-pub async fn render_path_handler(
-    path: String,
-    templates: PathBuf,
-    template: String,
-    watch_dir: PathBuf,
-) -> Result<Html<String>, (StatusCode, String)> {
+// #[axum::debug_handler]
+async fn render_path_handler(
+    State(state): State<WebState>,
+    Path(path): Path<String>,
+) -> Result<Response, AppError> {
     let mut requested = path.trim_matches('/').to_string();
     if requested.ends_with(".html") {
         requested = requested.trim_end_matches(".html").to_string();
         requested = format!("{}.md", requested);
     }
 
-    let base = watch_dir.join(&requested);
+    let base = state.watch_dir.join(&requested);
     let md_path: PathBuf = if base.is_dir() {
         base.join("index.md")
     } else {
         base.clone()
     };
 
-    let config = config::load_overrides(&md_path, &watch_dir).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to load config: {}", e),
-        )
-    })?;
+    let mut glob_cache = state.glob_cache.lock().await;
+
+    let config = config::load_overrides(&md_path, &state.watch_dir, None)
+        .context("Failed to read config: ")
+        .map_err(AppError)?;
 
     let config_cloned = config.clone();
 
-    let final_templates = config_cloned.templates.unwrap_or(templates.clone());
-    let final_template = config_cloned.template.unwrap_or(template.clone());
+    if let Some(ignore) = config_cloned.build.ignore {
+        if glob_cache.is_match(&ignore, &md_path).unwrap_or(false) {
+            return Err(AppError::from(anyhow::anyhow!(
+                "Ignored path: {}",
+                md_path.display()
+            )));
+        }
+    }
 
     let content = if md_path.is_file() {
         std::fs::read_to_string(&md_path)
@@ -183,26 +212,54 @@ pub async fn render_path_handler(
             format!("file not found: {}", md_path.display()),
         ))
     }
-    .map_err(|e| (StatusCode::NOT_FOUND, format!("Failed to read file: {}", e)))?;
+    .with_context(|| format!("Failed to read file: {}", md_path.display()))?;
 
-    let rendered = render_markdown(content, &final_templates, &final_template, config)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to render: {}", e),
-            )
-        })?;
+    if md_path.extension().and_then(|s| s.to_str()) == Some("md") {
+        let final_templates = config_cloned.templates.unwrap_or(state.templates);
+        let final_template = config_cloned.template.unwrap_or(state.template);
 
-    Ok(Html(rendered))
+        let rendered = render_markdown(content, &final_templates, &final_template, config)
+            .await
+            .with_context(|| format!("Failed to render HTML: {}", md_path.display()))?;
+
+        Ok(Html(rendered).into_response())
+    } else {
+        info!("{}", md_path.display());
+        let body = Body::from(content);
+        let mut headers = HeaderMap::new();
+        let mime = mime_guess::from_path(md_path).first_or_octet_stream();
+        let mime = mime.essence_str();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(mime)
+                .with_context(|| format!("Mime type {mime} is not a valid HeaderValue"))?,
+        );
+        Ok((headers, body).into_response())
+    }
 }
 
-fn collect_md_files(root: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
+fn collect_files(
+    root: &std::path::Path,
+    config: &Config,
+    glob_cache: &mut GlobCache,
+) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let mut stack = Vec::new();
-    stack.push(root.to_path_buf());
+    let mut stack = vec![root.to_path_buf()];
+
+    let ignore_patterns = &config.build.ignore;
+
+    let mut is_ignored = |path: &std::path::Path| -> bool {
+        ignore_patterns
+            .clone()
+            .map(|pats| glob_cache.is_match(&pats, path).unwrap_or(false))
+            .unwrap_or(false)
+    };
 
     while let Some(dir) = stack.pop() {
+        if is_ignored(&dir) {
+            continue;
+        }
+
         let rd = match std::fs::read_dir(&dir) {
             Ok(r) => r,
             Err(e) => {
@@ -215,9 +272,12 @@ fn collect_md_files(root: &std::path::Path) -> anyhow::Result<Vec<PathBuf>> {
             match entry {
                 Ok(ent) => {
                     let path = ent.path();
+                    if is_ignored(&path) {
+                        continue;
+                    }
                     if path.is_dir() {
                         stack.push(path);
-                    } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                    } else {
                         files.push(path);
                     }
                 }
@@ -236,6 +296,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt::init();
 
+    let mut glob_cache = GlobCache::default();
+
     match args.command {
         Commands::Build {
             input_dir,
@@ -250,69 +312,82 @@ async fn main() -> anyhow::Result<()> {
 
             std::fs::create_dir_all(&output_dir)?;
 
-            for path in collect_md_files(&input_dir)? {
-                let filename = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(s) => s.to_string(),
-                    None => continue,
-                };
+            let root_config = config::load_overrides(
+                &input_dir,
+                &input_dir,
+                Some(&Config {
+                    templates: Some(templates.clone()),
+                    template: Some(template.clone()),
+                    ..Default::default()
+                }),
+            )?;
 
-                let config = match config::load_overrides(&path, &input_dir) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("failed to load config for {}: {}", path.display(), e);
-                        Config::default()
-                    }
-                };
-
-                let config_cloned = config.clone();
-                let final_templates = config_cloned.templates.unwrap_or(templates.clone());
-                let final_template = config_cloned.template.unwrap_or(template.clone());
-
-                let raw = match std::fs::read_to_string(&path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("failed to read {}: {}", path.display(), e);
-                        continue;
-                    }
-                };
-
-                let rendered =
-                    match render_markdown(raw, &final_templates, &final_template, config).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("failed to render {}: {}", path.display(), e);
-                            continue;
-                        }
-                    };
-
-                let mut cfg = Cfg::new();
-                cfg.enable_possibly_noncompliant();
-                cfg.minify_css = true;
-                cfg.minify_js = true;
-
-                let minified = minify(rendered.as_bytes(), &cfg);
-                let minified: &str = match str::from_utf8(&minified) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("failed to minify {}: {}", path.display(), e);
-                        continue;
-                    }
-                };
-
-                let rel = match path.strip_prefix(&input_dir) {
-                    Ok(p) => p,
-                    Err(_) => std::path::Path::new(&filename),
-                };
+            for path in collect_files(&input_dir, &root_config, &mut glob_cache)? {
+                let rel = path.strip_prefix(&input_dir)?;
                 let mut out_path = output_dir.join(rel);
-                out_path.set_extension("html");
+
                 if let Some(parent) = out_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
 
-                if let Err(e) = std::fs::write(&out_path, minified) {
-                    error!("failed to write {}: {}", out_path.display(), e);
+                if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                    let config = match config::load_overrides(&path, &input_dir, Some(&root_config))
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("failed to load config for {}: {}", path.display(), e);
+                            Config::default()
+                        }
+                    };
+
+                    let config_cloned = config.clone();
+                    let final_templates = config_cloned.templates.unwrap_or(templates.clone());
+                    let final_template = config_cloned.template.unwrap_or(template.clone());
+
+                    let raw = match std::fs::read_to_string(&path) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!("failed to read {}: {}", path.display(), e);
+                            continue;
+                        }
+                    };
+
+                    let mut rendered =
+                        match render_markdown(raw, &final_templates, &final_template, config).await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!("failed to render {}: {}", path.display(), e);
+                                continue;
+                            }
+                        };
+
+                    if let Some(true) = config_cloned.build.minify {
+                        let mut cfg = Cfg::new();
+                        cfg.enable_possibly_noncompliant();
+                        cfg.minify_css = true;
+                        cfg.minify_js = true;
+
+                        let minified = minify(rendered.as_bytes(), &cfg);
+                        rendered = match str::from_utf8(&minified) {
+                            Ok(s) => s.to_string(),
+                            Err(e) => {
+                                error!("failed to minify {}: {}", path.display(), e);
+                                continue;
+                            }
+                        };
+                    }
+
+                    out_path.set_extension("html");
+
+                    if let Err(e) = std::fs::write(&out_path, rendered) {
+                        error!("failed to write {}: {}", out_path.display(), e);
+                    } else {
+                        info!("wrote {}", out_path.display());
+                    }
                 } else {
-                    info!("wrote {}", out_path.display());
+                    std::fs::copy(&path, &out_path)?;
+                    info!("copied {}", out_path.display());
                 }
             }
 
@@ -329,17 +404,17 @@ async fn main() -> anyhow::Result<()> {
             let livereload = LiveReloadLayer::new();
             let reloader = livereload.reloader();
 
-            let watch_dir_route = watch_dir.clone();
-            let templates_route = templates.clone();
+            let state = WebState {
+                templates: templates.clone(),
+                template,
+                watch_dir: watch_dir.clone(),
+                glob_cache: Arc::new(Mutex::new(GlobCache::default())),
+            };
 
             let app = Router::new()
                 .route("/", get(|| async { Redirect::permanent("/index.html") }))
-                .route(
-                    "/{*path}",
-                    get(async move |Path(path): Path<String>| {
-                        render_path_handler(path, templates_route, template, watch_dir_route).await
-                    }),
-                )
+                .route("/{*path}", get(render_path_handler))
+                .with_state(state)
                 .layer(tower_http::trace::TraceLayer::new_for_http())
                 .layer(livereload);
 
@@ -358,5 +433,26 @@ async fn main() -> anyhow::Result<()> {
             axum::serve(listener, app).await.unwrap();
             Ok(())
         }
+    }
+}
+
+struct AppError(anyhow::Error);
+
+impl axum::response::IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Something went wrong: {}", self.0),
+        )
+            .into_response()
+    }
+}
+
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
     }
 }

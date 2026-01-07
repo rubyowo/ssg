@@ -1,5 +1,5 @@
-use anyhow::Ok;
-use tera::{Context, Tera};
+use anyhow::{Context, Ok};
+use tera::Tera;
 
 pub struct TemplateEngine {
     tera: Tera,
@@ -29,15 +29,17 @@ impl TemplateEngine {
         Ok(Self { tera })
     }
 
-    pub fn render(&self, template: &str, ctx: Context) -> anyhow::Result<String> {
-        Ok(self.tera.render(template, &ctx)?)
+    pub fn render(&self, template: &str, ctx: tera::Context) -> anyhow::Result<String> {
+        self.tera
+            .render(template, &ctx)
+            .with_context(|| format!("Failed to render template: {}", template))
     }
 }
 
 /// Render a template using an existing global Tera context and plugin pipelines.
 /// Usage:
 /// ```rust
-/// render!(
+/// render_template!(
 ///     template_engine,
 ///     "test.tera",
 ///     Some(global_ctx), // or None
