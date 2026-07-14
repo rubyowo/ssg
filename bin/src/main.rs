@@ -62,6 +62,8 @@ enum Commands {
 #[tokio::main]
 #[hotpath::main]
 async fn main() -> Result<()> {
+    hotpath::tokio_runtime!();
+
     let args = Args::parse();
     tracing_subscriber::fmt::init();
     let mut glob_cache = GlobCache::default();
@@ -208,7 +210,38 @@ async fn main() -> Result<()> {
                                 }
                             };
 
+                            let mut needs_full_rebuild = false;
+                            let mut to_recompile = vec![];
+
                             for path in ev.paths {
+                                let abs_path = match std::fs::canonicalize(&path) {
+                                    Ok(p) => p,
+                                    Err(_) => path,
+                                };
+
+                                let ext = abs_path.extension().and_then(|s| s.to_str());
+                                match ext {
+                                    Some("md") => {
+                                        to_recompile.push(abs_path);
+                                    }
+                                    Some("rhai") | Some("toml") | Some("html") | Some("tera") => {
+                                        needs_full_rebuild = true;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            if needs_full_rebuild {
+                                info!("Plugin, config, or template changed. Rebuilding all pages in background");
+                                if let Err(e) = state.rebuild_all().await {
+                                    error!("Background full rebuild failed: {e}");
+                                } else {
+                                    info!("Background full rebuild completed successfully!");
+                                }
+                            } else {
+
+                            for path in to_recompile {
                                 if path.extension().and_then(|s| s.to_str()) == Some("md")
                                     && let Ok(content) = tokio::fs::read_to_string(&path).await {
                                         let root_config = match config::load_overrides(
@@ -259,6 +292,7 @@ async fn main() -> Result<()> {
                                         }
                                     }
                             }
+                        }
 
                             reloader_clone.reload();
                         });

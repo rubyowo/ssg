@@ -31,39 +31,26 @@ pub struct WebState {
     pub rhai_engine: Arc<Engine>,
 }
 
-#[axum::debug_handler]
-#[hotpath::measure]
-pub async fn render_path_handler(
-    State(state): State<WebState>,
-    AxumPath(path): AxumPath<String>,
-) -> Result<Response, AppError> {
-    let mut requested = path.trim_matches('/').to_string();
-    if requested.ends_with(".html") {
-        requested = requested.trim_end_matches(".html").to_string();
-        requested = format!("{}.md", requested);
-    }
+#[hotpath::measure_all]
+impl WebState {
+    /// Recompiles every markdown file in the watch directory concurrently
+    /// and updates the shared memory caches.
+    pub async fn rebuild_all(&self) -> Result<()> {
+        let config = config::load_overrides(&self.watch_dir, &self.watch_dir, None)?;
+        let files = {
+            let mut glob_cache = self.glob_cache.lock().await;
+            collect_files(&self.watch_dir, &config, &mut glob_cache)?
+        };
 
-    let base = state.watch_dir.join(&requested);
-    let md_path = if base.is_dir() {
-        base.join("index.md")
-    } else {
-        base
-    };
-
-    let mut glob_cache = state.glob_cache.lock().await;
-    let config = config::load_overrides(&md_path, &state.watch_dir, None).map_err(AppError)?;
-
-    let cache_is_empty = state.rendered_pages.read().await.is_empty();
-    if cache_is_empty {
         let mut initial_pages = HashMap::new();
-        let files = collect_files(&state.watch_dir, &config, &mut glob_cache)?;
+        let mut tasks = vec![];
 
-        let mut tasks = Vec::new();
         for f_path in files {
             if f_path.extension().and_then(|s| s.to_str()) == Some("md") {
-                let watch_dir = state.watch_dir.clone();
+                let watch_dir = self.watch_dir.clone();
                 let config = config.clone();
-                let rhai_engine = state.rhai_engine.clone();
+                let rhai_engine = self.rhai_engine.clone();
+
                 tasks.push(tokio::spawn(async move {
                     if let Ok(content) = tokio::fs::read_to_string(&f_path).await
                         && let Ok(page_ctx) = render_markdown(content, &config, rhai_engine).await
@@ -86,18 +73,56 @@ pub async fn render_path_handler(
         }
 
         let initial_global = generate_global_context(&initial_pages, &config)?;
-        *state.rendered_pages.write().await = initial_pages;
-        *state.global_context.write().await = initial_global;
+
+        *self.rendered_pages.write().await = initial_pages;
+        *self.global_context.write().await = initial_global;
+
+        Ok(())
     }
+}
+
+#[axum::debug_handler]
+#[hotpath::measure]
+pub async fn render_path_handler(
+    State(state): State<WebState>,
+    AxumPath(path): AxumPath<String>,
+) -> Result<Response, AppError> {
+    let mut requested = path.trim_matches('/').to_string();
+    if requested.ends_with(".html") {
+        requested = requested.trim_end_matches(".html").to_string();
+        requested = format!("{}.md", requested);
+    }
+
+    let base = state.watch_dir.join(&requested);
+    let md_path = if base.is_dir() {
+        base.join("index.md")
+    } else {
+        base
+    };
+
+    let is_markdown = md_path.extension().and_then(|s| s.to_str()) == Some("md");
+    if is_markdown {
+        let cache_is_empty = state.rendered_pages.read().await.is_empty();
+        if cache_is_empty {
+            state.rebuild_all().await.map_err(AppError)?;
+        }
+    }
+
+    let config = config::load_overrides(&md_path, &state.watch_dir, None).map_err(AppError)?;
 
     let relative_target = md_path
         .strip_prefix(&state.watch_dir)?
         .to_string_lossy()
         .to_string();
 
-    let pages_read = state.rendered_pages.read().await;
-    let global_read = state.global_context.read().await;
-    let target_context = pages_read.get(&relative_target);
+    let (target_context, global_read) = {
+        let pages_read = state.rendered_pages.read().await;
+        let global_read = state.global_context.read().await;
+
+        (pages_read.get(&relative_target).cloned(), global_read.clone())
+    };
+
+    let mut glob_cache = state.glob_cache.lock().await;
 
     let (body, mime) = render_or_copy_file(
         &md_path,
@@ -107,7 +132,7 @@ pub async fn render_path_handler(
         &state.template,
         &state.template_engine,
         &config,
-        target_context,
+        target_context.as_ref(),
         &global_read,
         &mut glob_cache,
         false,

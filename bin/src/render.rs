@@ -218,22 +218,24 @@ pub async fn render_or_copy_file(
         let mut rendered =
             render_tera(ctx, template_engine, template, config, global_context).await?;
 
-        if config.build.minify.unwrap_or(false) {
-            let mut cfg = Cfg::new();
-            cfg.enable_possibly_noncompliant();
-            cfg.minify_css = true;
-            cfg.minify_js = true;
-            let minified = minify(rendered.as_bytes(), &cfg);
-            rendered = String::from_utf8(minified)?;
-        }
-
-        if for_build && let Some(mut out) = out_path {
-            if let Some(parent) = out.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+        if for_build {
+            if config.build.minify.unwrap_or(false) {
+                let mut cfg = Cfg::new();
+                cfg.enable_possibly_noncompliant();
+                cfg.minify_css = true;
+                cfg.minify_js = true;
+                let minified = minify(rendered.as_bytes(), &cfg);
+                rendered = String::from_utf8(minified)?;
             }
-            out.set_extension("html");
-            tokio::fs::write(&out, &rendered).await?;
-            info!("Rendered {}", out.display());
+
+            if let Some(mut out) = out_path {
+                if let Some(parent) = out.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                out.set_extension("html");
+                tokio::fs::write(&out, &rendered).await?;
+                info!("Rendered {}", out.display());
+            }
         }
 
         Ok(Some((rendered.into_bytes(), mime)))
