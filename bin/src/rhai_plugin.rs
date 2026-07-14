@@ -12,6 +12,7 @@ use rhai::{
 
 use crate::config::RhaiScript;
 
+#[hotpath::measure]
 pub fn compile_rhai_dir(dir_str: Option<String>, base_path: &Path) -> Vec<RhaiScript> {
     let mut scripts = Vec::new();
     let Some(path_str) = dir_str else {
@@ -38,6 +39,7 @@ pub fn compile_rhai_dir(dir_str: Option<String>, base_path: &Path) -> Vec<RhaiSc
     scripts
 }
 
+#[hotpath::measure]
 pub fn register_rhai_filter(tera: &mut tera::Tera, engine: Arc<Engine>, script: &RhaiScript) {
     let ast = script.ast.clone();
     let name = script.name.clone();
@@ -66,6 +68,7 @@ pub fn register_rhai_filter(tera: &mut tera::Tera, engine: Arc<Engine>, script: 
     );
 }
 
+#[hotpath::measure]
 pub fn register_rhai_function(tera: &mut tera::Tera, engine: Arc<Engine>, script: &RhaiScript) {
     let ast = script.ast.clone();
     let name = script.name.clone();

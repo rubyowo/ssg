@@ -1,6 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use log::{error, info};
+use log::{debug, error, info};
 use notify::Watcher;
 use rhai::Engine;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -22,7 +22,7 @@ use lib::tera;
 use crate::{
     config::Config,
     glob::GlobCache,
-    render::{render_markdown, render_or_copy_file},
+    render::{create_tera, render_markdown, render_or_copy_file},
     utils::{collect_files, generate_global_context, write_json_feed},
     web::{WebState, render_path_handler},
 };
@@ -60,6 +60,7 @@ enum Commands {
 }
 
 #[tokio::main]
+#[hotpath::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     tracing_subscriber::fmt::init();
@@ -76,7 +77,7 @@ async fn main() -> Result<()> {
                 error!("input path is not a directory: {}", input_dir.display());
                 return Err(anyhow::anyhow!("input path is not a directory"));
             }
-            std::fs::create_dir_all(&output_dir)?;
+            tokio::fs::create_dir_all(&output_dir).await?;
             let root_config = config::load_overrides(
                 &input_dir,
                 &input_dir,
@@ -92,19 +93,38 @@ async fn main() -> Result<()> {
 
             let files = collect_files(&input_dir, &root_config, &mut glob_cache)?;
 
+            let mut tasks = Vec::new();
             for path in &files {
                 if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                    let content = std::fs::read_to_string(path)?;
-                    let page_ctx =
-                        render_markdown(content, &root_config, rhai_engine.clone()).await?;
-                    let relative_path =
-                        path.strip_prefix(&input_dir)?.to_string_lossy().to_string();
-                    rendered_pages.insert(relative_path, page_ctx);
+                    let path = path.clone();
+                    let input_dir = input_dir.clone();
+                    let root_config = root_config.clone();
+                    let rhai_engine = rhai_engine.clone();
+
+                    tasks.push(tokio::spawn(async move {
+                        let content = std::fs::read_to_string(&path)?;
+                        let page_ctx = render_markdown(content, &root_config, rhai_engine).await?;
+                        let relative_path =
+                            path.strip_prefix(&input_dir)?.to_string_lossy().to_string();
+                        anyhow::Ok((relative_path, page_ctx))
+                    }));
+                }
+            }
+
+            for handle in futures::future::join_all(tasks).await {
+                match handle {
+                    Ok(Ok((relative_path, page_ctx))) => {
+                        rendered_pages.insert(relative_path, page_ctx);
+                    }
+                    Ok(Err(e)) => error!("Error parsing file: {e}"),
+                    Err(e) => error!("Thread join error: {e}"),
                 }
             }
 
             let global_context = generate_global_context(&rendered_pages, &root_config)?;
             write_json_feed(&output_dir, &root_config, &global_context)?;
+
+            let template_engine = create_tera(&templates, &root_config, &rhai_engine).expect("Failed to create templating engine");
 
             for path in files {
                 let relative_path = path.strip_prefix(&input_dir)?.to_string_lossy().to_string();
@@ -116,11 +136,13 @@ async fn main() -> Result<()> {
                     Some(&output_dir),
                     &templates,
                     &template,
+                    &template_engine,
                     &root_config,
                     page_ctx,
                     &global_context,
                     &mut glob_cache,
                     true,
+                    rhai_engine.clone(),
                 )
                 .await?;
             }
@@ -138,11 +160,28 @@ async fn main() -> Result<()> {
             let livereload = LiveReloadLayer::new();
             let reloader = livereload.reloader();
 
+            let root_config = config::load_overrides(
+                &watch_dir,
+                &watch_dir,
+                Some(&Config {
+                    templates: Some(templates.clone()),
+                    template: Some(template.clone()),
+                    ..Default::default()
+                }),
+            )?;
+
+            let rhai_engine = Arc::new(Engine::new());
+            let template_engine = create_tera(&templates, &root_config, &rhai_engine.clone())?;
+
             let state = WebState {
                 templates: templates.clone(),
                 template,
+                template_engine,
                 watch_dir: watch_dir.clone(),
                 glob_cache: Arc::new(Mutex::new(GlobCache::default())),
+                rendered_pages: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+                global_context: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+                rhai_engine,
             };
 
             let app = Router::new()
@@ -152,10 +191,78 @@ async fn main() -> Result<()> {
                 .layer(tower_http::trace::TraceLayer::new_for_http())
                 .layer(livereload);
 
-            let mut watcher = notify::recommended_watcher(move |ev: Result<_, _>| {
-                if ev.is_ok_and(|evt: notify::Event| !evt.kind.is_access()) {
-                    reloader.reload();
-                }
+            let handle = tokio::runtime::Handle::current();
+            let mut watcher = notify::recommended_watcher(move |ev: Result<notify::Event, _>| {
+                if let Ok(ev) = ev {
+                    if !ev.kind.is_access() {
+                        let state = state.clone();
+                        let reloader_clone = reloader.clone();
+                        handle.spawn(async move {
+                            let abs_watch_dir = match std::fs::canonicalize(&state.watch_dir) {
+                                Ok(path) => path,
+                                Err(e) => {
+                                    error!("Failed to canonicalize watch directory: {e}");
+                                    return;
+                                }
+                            };
+
+                            for path in ev.paths {
+                                if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                                        let root_config = match config::load_overrides(
+                                            &path,
+                                            &state.watch_dir,
+                                            None,
+                                        ) {
+                                            Ok(cfg) => cfg,
+                                            Err(_) => continue,
+                                        };
+                                        debug!("Edited file content: {}", content.clone());
+                                        match render_markdown(
+                                            content,
+                                            &root_config,
+                                            state.rhai_engine.clone(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(page_ctx) => {
+                                                let relative = match path
+                                                    .strip_prefix(&abs_watch_dir)
+                                                {
+                                                    Ok(rel) => rel.to_string_lossy().to_string(),
+                                                    Err(e) => {
+                                                        error!("Failed to strip prefix: {e}\nPrefix: {:#?}\nPath: {:#?}", state.watch_dir, path);
+                                                        continue
+                                                    },
+                                                };
+
+                                                let updated_global = {
+                                                    let mut pages_write =
+                                                        state.rendered_pages.write().await;
+                                                    pages_write.insert(relative, page_ctx);
+                                                    generate_global_context(
+                                                        &pages_write,
+                                                        &root_config,
+                                                    )
+                                                    .unwrap_or_default()
+                                                };
+
+                                                *state.global_context.write().await =
+                                                    updated_global;
+                                                info!("Background recompiled: {}", path.display());
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to render markdown in the background: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            reloader_clone.reload();
+                        });
+                    }
+                };
             })?;
             watcher.watch(&watch_dir, notify::RecursiveMode::Recursive)?;
             watcher.watch(&templates, notify::RecursiveMode::Recursive)?;

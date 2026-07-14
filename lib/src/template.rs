@@ -1,6 +1,7 @@
 use anyhow::{Context, Ok};
 use tera::Tera;
 
+#[derive(Clone)]
 pub struct TemplateEngine {
     tera: Tera,
 }

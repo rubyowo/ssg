@@ -23,6 +23,7 @@ use crate::{
     rhai_plugin::{RhaiPlugin, register_rhai_filter, register_rhai_function},
 };
 
+#[hotpath::measure]
 pub async fn render_markdown(
     content: String,
     config: &Config,
@@ -30,6 +31,7 @@ pub async fn render_markdown(
 ) -> Result<PageContext> {
     let (frontmatter, md_content) =
         parse_md(&content).with_context(|| "Failed to parse frontmatter")?;
+    debug!("Rendering content: {}", md_content);
     let mut ast = to_ast(md_content.to_string());
 
     let mut pipeline = PluginPipeline::new();
@@ -90,19 +92,45 @@ pub async fn render_markdown(
     })
 }
 
+#[hotpath::measure]
+pub fn create_tera(
+    templates: &PathBuf,
+    config: &Config,
+    rhai_engine: &Arc<Engine>,
+) -> anyhow::Result<TemplateEngine> {
+    let custom_filters = config.filters.clone();
+    let custom_functions = config.functions.clone();
+
+    let engine_clone = rhai_engine.clone();
+    TemplateEngine::new(templates, move |tera| {
+        for filter in &custom_filters {
+            register_rhai_filter(tera, engine_clone.clone(), filter);
+        }
+
+        for func in &custom_functions {
+            register_rhai_function(tera, engine_clone.clone(), func);
+        }
+
+        Ok(())
+    })
+}
+
+#[hotpath::measure]
 pub async fn render_tera(
     page_context: &PageContext,
-    templates: &PathBuf,
+    template_engine: &TemplateEngine,
     template_name: &str,
-    config: Config,
+    config: &Config,
     global_context: &HashMap<String, tera::Value>,
 ) -> Result<String> {
-    let themes: Vec<String> = config.clone().highlighting_themes.unwrap_or_else(|| {
-        vec![
+    let themes: Vec<String> = config
+        .highlighting_themes
+        .as_deref()
+        .unwrap_or(&[
             "catppuccin_mocha".to_string(),
             "catppuccin_latte".to_string(),
-        ]
-    });
+        ])
+        .to_vec();
 
     let themes_css: String = themes
         .iter()
@@ -119,23 +147,6 @@ pub async fn render_tera(
     let css = base_css + themes_css.as_str();
     let hl_context = HighlighterThemeContext { themes, css };
 
-    let custom_filters = config.filters.clone();
-    let custom_functions = config.functions.clone();
-
-    let rhai_engine = Arc::new(Engine::new());
-    let engine_clone = rhai_engine.clone();
-    let template_engine = TemplateEngine::new(templates, move |tera| {
-        for filter in &custom_filters {
-            register_rhai_filter(tera, engine_clone.clone(), filter);
-        }
-
-        for func in &custom_functions {
-            register_rhai_function(tera, engine_clone.clone(), func);
-        }
-
-        Ok(())
-    })?;
-
     let rendered = render_template!(
         template_engine,
         template_name,
@@ -149,17 +160,20 @@ pub async fn render_tera(
     Ok(rendered)
 }
 
+#[hotpath::measure]
 pub async fn render_or_copy_file(
     input_path: &Path,
     root_dir: &Path,
     output_dir: Option<&Path>,
     default_templates: &PathBuf,
     default_template: &str,
+    template_engine: &TemplateEngine,
     config: &Config,
     page_context: Option<&PageContext>,
     global_context: &HashMap<String, tera::Value>,
     glob_cache: &mut GlobCache,
     for_build: bool,
+    rhai_engine: Arc<Engine>,
 ) -> Result<Option<(Vec<u8>, String)>> {
     debug!("Processing input path: {}", input_path.display());
     if let Some(ignore) = config.build.ignore.as_ref() {
@@ -169,7 +183,6 @@ pub async fn render_or_copy_file(
         }
     }
 
-    let content = std::fs::read(input_path)?;
     let out_path = output_dir
         .map(|out| -> Result<PathBuf> {
             let relative = input_path.strip_prefix(root_dir).with_context(|| {
@@ -193,27 +206,24 @@ pub async fn render_or_copy_file(
     };
 
     if is_markdown {
-        let templates = config
-            .templates
-            .as_ref()
-            .unwrap_or_else(|| default_templates);
         let template = config.template.as_ref().map_or(default_template, |v| v);
 
         let ctx = match page_context {
             Some(c) => c,
-            None => &{
-                let rhai_engine = Arc::new(Engine::new());
-                render_markdown(
-                    String::from_utf8_lossy(&content).to_string(),
-                    config,
-                    rhai_engine,
-                )
-                .await?
-            },
+            None => {
+                let content = tokio::fs::read_to_string(input_path).await?;
+                &render_markdown(content, config, rhai_engine.clone()).await?
+            }
         };
 
-        let mut rendered =
-            render_tera(ctx, templates, template, config.clone(), global_context).await?;
+        let mut rendered = render_tera(
+            ctx,
+            template_engine,
+            template,
+            &config,
+            global_context
+        )
+        .await?;
 
         if config.build.minify.unwrap_or(false) {
             let mut cfg = Cfg::new();
@@ -227,22 +237,23 @@ pub async fn render_or_copy_file(
         if for_build {
             if let Some(mut out) = out_path {
                 if let Some(parent) = out.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    tokio::fs::create_dir_all(parent).await?;
                 }
                 out.set_extension("html");
-                std::fs::write(&out, &rendered)?;
+                tokio::fs::write(&out, &rendered).await?;
                 info!("Rendered {}", out.display());
             }
         }
 
         Ok(Some((rendered.into_bytes(), mime)))
     } else {
+        let content = tokio::fs::read(input_path).await?;
         if for_build {
             if let Some(out) = out_path {
                 if let Some(parent) = out.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    tokio::fs::create_dir_all(parent).await?;
                 }
-                std::fs::copy(input_path, &out)?;
+                tokio::fs::copy(input_path, &out).await?;
                 info!("Copied {}", out.display());
             }
         }

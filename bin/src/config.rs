@@ -159,6 +159,7 @@ fn merge_build_config(parent: &BuildConfig, local: &BuildConfig) -> BuildConfig 
     }
 }
 
+#[hotpath::measure]
 pub fn load_overrides(
     md_path: &Path,
     watch_dir: &Path,

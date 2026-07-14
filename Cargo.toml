@@ -12,7 +12,7 @@ codegen-units = 16
 
 [profile.release]
 opt-level = 3
-debug = false
+debug = true
 lto = true
 #panic = "abort"
 codegen-units = 1

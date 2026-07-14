@@ -5,11 +5,12 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use lib::{PageContext, TemplateEngine, tera};
 use rhai::Engine;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     config,
@@ -22,11 +23,16 @@ use crate::{
 pub struct WebState {
     pub templates: PathBuf,
     pub template: String,
+    pub template_engine: TemplateEngine,
     pub watch_dir: PathBuf,
     pub glob_cache: Arc<Mutex<GlobCache>>,
+    pub rendered_pages: Arc<RwLock<HashMap<String, PageContext>>>,
+    pub global_context: Arc<RwLock<HashMap<String, tera::Value>>>,
+    pub rhai_engine: Arc<Engine>,
 }
 
 #[axum::debug_handler]
+#[hotpath::measure]
 pub async fn render_path_handler(
     State(state): State<WebState>,
     AxumPath(path): AxumPath<String>,
@@ -47,30 +53,51 @@ pub async fn render_path_handler(
     let mut glob_cache = state.glob_cache.lock().await;
     let config = config::load_overrides(&md_path, &state.watch_dir, None).map_err(AppError)?;
 
-    let mut rendered_pages = HashMap::new();
-    let rhai_engine = Arc::new(Engine::new());
-    let files = collect_files(&state.watch_dir, &config, &mut glob_cache)?;
+    let cache_is_empty = state.rendered_pages.read().await.is_empty();
+    if cache_is_empty {
+        let mut initial_pages = HashMap::new();
+        let files = collect_files(&state.watch_dir, &config, &mut glob_cache)?;
 
-    for f_path in files {
-        if f_path.extension().and_then(|s| s.to_str()) == Some("md") {
-            if let Ok(content) = std::fs::read_to_string(&f_path) {
-                if let Ok(page_ctx) = render_markdown(content, &config, rhai_engine.clone()).await {
-                    let relative = f_path
-                        .strip_prefix(&state.watch_dir)?
-                        .to_string_lossy()
-                        .to_string();
-                    rendered_pages.insert(relative, page_ctx);
-                }
+        let mut tasks = Vec::new();
+        for f_path in files {
+            if f_path.extension().and_then(|s| s.to_str()) == Some("md") {
+                let watch_dir = state.watch_dir.clone();
+                let config = config.clone();
+                let rhai_engine = state.rhai_engine.clone();
+                tasks.push(tokio::spawn(async move {
+                    if let Ok(content) = tokio::fs::read_to_string(&f_path).await {
+                        if let Ok(page_ctx) = render_markdown(content, &config, rhai_engine).await {
+                            let relative = f_path
+                                .strip_prefix(&watch_dir)?
+                                .to_string_lossy()
+                                .to_string();
+                            return anyhow::Ok(Some((relative, page_ctx)));
+                        }
+                    }
+                    anyhow::Ok(None)
+                }));
             }
         }
+
+        for task in futures::future::join_all(tasks).await {
+            if let Ok(Ok(Some((rel, ctx)))) = task {
+                initial_pages.insert(rel, ctx);
+            }
+        }
+
+        let initial_global = generate_global_context(&initial_pages, &config)?;
+        *state.rendered_pages.write().await = initial_pages;
+        *state.global_context.write().await = initial_global;
     }
 
-    let global_context = generate_global_context(&rendered_pages, &config)?;
     let relative_target = md_path
         .strip_prefix(&state.watch_dir)?
         .to_string_lossy()
         .to_string();
-    let target_context = rendered_pages.get(&relative_target);
+
+    let pages_read = state.rendered_pages.read().await;
+    let global_read = state.global_context.read().await;
+    let target_context = pages_read.get(&relative_target);
 
     let (body, mime) = render_or_copy_file(
         &md_path,
@@ -78,11 +105,13 @@ pub async fn render_path_handler(
         None,
         &state.templates,
         &state.template,
+        &state.template_engine,
         &config,
         target_context,
-        &global_context,
+        &global_read,
         &mut glob_cache,
         false,
+        state.rhai_engine,
     )
     .await?
     .ok_or_else(|| AppError(anyhow::anyhow!("Ignored path: {}", md_path.display())))?;

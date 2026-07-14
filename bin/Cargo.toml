@@ -25,3 +25,10 @@ globset = "0.4"
 once_cell = "1.21"
 mime_guess = "2.0.5"
 rhai = { version = "1.25", features = ["serde", "sync"] }
+futures = "0.3.32"
+hotpath = "0.21"
+
+[features]
+hotpath = ["hotpath/hotpath"]
+hotpath-cpu = ["hotpath/hotpath-cpu"]
+hotpath-alloc = ["hotpath/hotpath-alloc"]
