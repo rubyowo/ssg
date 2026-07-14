@@ -1,7 +1,14 @@
 use std::{path::Path, sync::Arc};
 
-use lib::{md_crate::mdast::Node, plugin::{MarkdownPlugin, NodeKind}, tera::{self, Kwargs, TeraResult, Value}};
-use rhai::{AST, Dynamic, Engine, Scope, serde::{from_dynamic, to_dynamic}};
+use lib::{
+    md_crate::mdast::Node,
+    plugin::{MarkdownPlugin, NodeKind},
+    tera::{self, Kwargs, TeraResult, Value},
+};
+use rhai::{
+    AST, Dynamic, Engine, Scope,
+    serde::{from_dynamic, to_dynamic},
+};
 
 use crate::config::RhaiScript;
 
@@ -93,8 +100,18 @@ pub struct RhaiPlugin {
 }
 
 impl RhaiPlugin {
-    pub fn boxed(kind: Option<NodeKind>, name: String, ast: AST, engine: Arc<Engine>) -> Box<dyn MarkdownPlugin> {
-        Box::new(Self { kind, name, ast, engine })
+    pub fn boxed(
+        kind: Option<NodeKind>,
+        name: String,
+        ast: AST,
+        engine: Arc<Engine>,
+    ) -> Box<dyn MarkdownPlugin> {
+        Box::new(Self {
+            kind,
+            name,
+            ast,
+            engine,
+        })
     }
 }
 
@@ -104,14 +121,17 @@ impl MarkdownPlugin for RhaiPlugin {
     }
 
     fn run(&mut self, node: &mut Node) {
-        let kind_str = self.kind.map(|k| format!("{:?}", k)).unwrap_or_else(|| "Unknown".to_string());
-        
+        let kind_str = self
+            .kind
+            .map(|k| format!("{:?}", k))
+            .unwrap_or_else(|| "Unknown".to_string());
+
         if let Ok(r_node) = to_dynamic(&node) {
             if let Ok(updated) = self.engine.call_fn::<Dynamic>(
                 &mut Scope::new(),
                 &self.ast,
                 "execute",
-                (r_node, kind_str)
+                (r_node, kind_str),
             ) {
                 if let Ok(actual_node) = from_dynamic(&updated) {
                     *node = actual_node;

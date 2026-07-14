@@ -42,7 +42,7 @@ pub struct TomlConfig {
     pub plugins_dir: Option<String>,
     pub filters_dir: Option<String>,
     pub functions_dir: Option<String>,
-    pub feed: Option<FeedConfig>
+    pub feed: Option<FeedConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -61,7 +61,7 @@ pub struct Config {
     pub plugins: Vec<RhaiScript>,
     pub filters: Vec<RhaiScript>,
     pub functions: Vec<RhaiScript>,
-    pub feed: Option<FeedConfig>
+    pub feed: Option<FeedConfig>,
 }
 
 impl Config {
@@ -94,7 +94,7 @@ impl Config {
             plugins: compile_rhai_dir(cfg.plugins_dir, base_dir),
             filters: compile_rhai_dir(cfg.filters_dir, base_dir),
             functions: compile_rhai_dir(cfg.functions_dir, base_dir),
-            feed: cfg.feed
+            feed: cfg.feed,
         })
     }
 

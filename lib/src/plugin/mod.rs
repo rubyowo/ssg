@@ -1,10 +1,10 @@
+pub mod jsonfeed;
 pub mod math;
 pub mod pipeline;
 pub mod reading_time;
 pub mod syntax_highlighting;
-pub mod toc;
 pub mod tags;
-pub mod jsonfeed;
+pub mod toc;
 
 use std::collections::HashMap;
 
@@ -17,7 +17,11 @@ use crate::PageContext;
 /// A plugin that processes the aggregated frontmatter of the entire site
 pub trait GlobalPlugin: Send + Sync {
     fn name(&self) -> &str;
-    fn run(&mut self, all_pages: &HashMap<String, PageContext>, global_context: &mut HashMap<String, tera::Value>);
+    fn run(
+        &mut self,
+        all_pages: &HashMap<String, PageContext>,
+        global_context: &mut HashMap<String, tera::Value>,
+    );
 }
 
 macro_rules! define_mdast_nodes {
@@ -96,9 +100,9 @@ impl<F> NativePlugin<F>
 where
     F: FnMut(&mut Node) + Send + Sync,
 {
-    pub fn boxed(kind: NodeKind, func: F) -> Box<dyn MarkdownPlugin> 
+    pub fn boxed(kind: NodeKind, func: F) -> Box<dyn MarkdownPlugin>
     where
-        Self: 'static
+        Self: 'static,
     {
         Box::new(Self { kind, func })
     }

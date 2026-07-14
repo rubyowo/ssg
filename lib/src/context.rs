@@ -9,7 +9,7 @@ pub struct PageContext {
     pub content: String,
     #[serde(skip_serializing)]
     pub ast: Node,
-    
+
     // plugin contexts
     pub reading: crate::plugin::reading_time::ReadingTimeContext,
     pub toc: crate::plugin::toc::TocContext,

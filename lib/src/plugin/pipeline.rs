@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use markdown::mdast::Node;
 
-use crate::{PageContext, plugin::{GlobalPlugin, NativePlugin, NodeKind, children_mut}};
+use crate::{
+    PageContext,
+    plugin::{GlobalPlugin, NativePlugin, NodeKind, children_mut},
+};
 
 pub struct GlobalPipeline {
     plugins: Vec<Box<dyn GlobalPlugin>>,
@@ -10,14 +13,19 @@ pub struct GlobalPipeline {
 
 impl GlobalPipeline {
     pub fn new() -> Self {
-        Self { plugins: Vec::new() }
+        Self {
+            plugins: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, plugin: Box<dyn GlobalPlugin>) {
         self.plugins.push(plugin);
     }
 
-    pub fn run(&mut self, all_pages: &HashMap<String, PageContext>) -> HashMap<String, tera::Value> {
+    pub fn run(
+        &mut self,
+        all_pages: &HashMap<String, PageContext>,
+    ) -> HashMap<String, tera::Value> {
         let mut global_context = HashMap::new();
         for plugin in &mut self.plugins {
             // println!("Running global plugin: {}", plugin.name());
@@ -28,7 +36,7 @@ impl GlobalPipeline {
 }
 
 pub trait MarkdownPlugin: Send + Sync {
-    /// Specify which Node type this plugin transforms. 
+    /// Specify which Node type this plugin transforms.
     /// Returns `None` if it should evaluate against every single node.
     fn target_kind(&self) -> Option<NodeKind>;
 
@@ -41,7 +49,9 @@ pub struct PluginPipeline {
 
 impl PluginPipeline {
     pub fn new() -> Self {
-        Self { plugins: Vec::new() }
+        Self {
+            plugins: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, plugin: Box<dyn MarkdownPlugin>) {
@@ -70,14 +80,16 @@ impl PluginPipeline {
 }
 
 pub trait PipelineBuiltinsExt {
-    fn register_native<F>(&mut self, kind: NodeKind, func: F) where F: FnMut(&mut Node) + Send + Sync + 'static;
+    fn register_native<F>(&mut self, kind: NodeKind, func: F)
+    where
+        F: FnMut(&mut Node) + Send + Sync + 'static;
 }
 
 impl PipelineBuiltinsExt for PluginPipeline {
     #[inline]
-    fn register_native<F>(&mut self, kind: NodeKind, func: F) 
-    where 
-        F: FnMut(&mut Node) + Send + Sync + 'static 
+    fn register_native<F>(&mut self, kind: NodeKind, func: F)
+    where
+        F: FnMut(&mut Node) + Send + Sync + 'static,
     {
         self.register(NativePlugin::boxed(kind, func));
     }
