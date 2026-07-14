@@ -14,7 +14,7 @@ pub use pipeline::*;
 
 use crate::PageContext;
 
-/// A plugin that processes the aggregated frontmatter of the entire site
+/// A plugin that processes the aggregated `PageContext`s of the entire site
 pub trait GlobalPlugin: Send + Sync {
     fn name(&self) -> &str;
     fn run(

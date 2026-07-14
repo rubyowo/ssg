@@ -3,12 +3,16 @@ name = "bin"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "ssg"
+path = "src/main.rs"
+
 [dependencies]
 lib = { path = "../lib" }
 axum = { version = "0.8", features = ["macros"] }
 axum-macros = { version = "0.5.0-rc.1" }
 # axum = "0.8"
-tower-http = { version = "0.7", features = ["trace"] }
+tower-http = { version = "0.7", features = ["trace", "fs"] }
 tower-livereload = "0.10"
 notify = "8.2"
 tokio = { version = "1.52", features = ["full"] }
@@ -27,6 +31,7 @@ mime_guess = "2.0.5"
 rhai = { version = "1.25", features = ["serde", "sync"] }
 futures = "0.3.32"
 hotpath = {version = "0.21", features = ["tokio"] }
+percent-encoding = "2.3.2"
 
 [features]
 hotpath = ["hotpath/hotpath"]

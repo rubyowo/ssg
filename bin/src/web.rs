@@ -2,7 +2,7 @@ use anyhow::Result;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
 use lib::{PageContext, TemplateEngine, tera};
@@ -85,27 +85,41 @@ impl WebState {
 #[hotpath::measure]
 pub async fn render_path_handler(
     State(state): State<WebState>,
-    AxumPath(path): AxumPath<String>,
+    uri: Uri
 ) -> Result<Response, AppError> {
-    let mut requested = path.trim_matches('/').to_string();
-    if requested.ends_with(".html") {
-        requested = requested.trim_end_matches(".html").to_string();
-        requested = format!("{}.md", requested);
+    let path = percent_encoding::percent_decode_str(uri.path())
+        .decode_utf8_lossy()
+        .into_owned();
+    let requested = path.trim_matches('/').to_string();
+
+    let mut target_path = state.watch_dir.join(&requested);
+    if target_path.is_dir() {
+        target_path = target_path.join("index.md");
     }
 
-    let base = state.watch_dir.join(&requested);
-    let md_path = if base.is_dir() {
-        base.join("index.md")
+    // if an html file is requested, check if the corresponding markdown file exists
+    let md_path = if requested.ends_with(".html") {
+        let md_equivalent = state
+            .watch_dir
+            .join(format!("{}.md", requested.trim_end_matches(".html")));
+
+        if md_equivalent.is_file() {
+            md_equivalent
+        } else {
+            target_path
+        }
     } else {
-        base
+        target_path
     };
 
-    let is_markdown = md_path.extension().and_then(|s| s.to_str()) == Some("md");
+    let is_markdown = md_path.extension().and_then(|s| s.to_str()) == Some("md") && md_path.is_file();
     if is_markdown {
         let cache_is_empty = state.rendered_pages.read().await.is_empty();
         if cache_is_empty {
             state.rebuild_all().await.map_err(AppError)?;
         }
+    } else {
+        return Err(AppError(anyhow::anyhow!("Not markdown: {}", md_path.display())));
     }
 
     let config = config::load_overrides(&md_path, &state.watch_dir, None).map_err(AppError)?;
@@ -119,7 +133,10 @@ pub async fn render_path_handler(
         let pages_read = state.rendered_pages.read().await;
         let global_read = state.global_context.read().await;
 
-        (pages_read.get(&relative_target).cloned(), global_read.clone())
+        (
+            pages_read.get(&relative_target).cloned(),
+            global_read.clone(),
+        )
     };
 
     let mut glob_cache = state.glob_cache.lock().await;

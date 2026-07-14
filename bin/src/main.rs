@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use log::{debug, error, info};
 use notify::Watcher;
 use rhai::Engine;
+use tower_http::services::ServeDir;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use tokio::sync::Mutex;
@@ -187,9 +188,13 @@ async fn main() -> Result<()> {
                 rhai_engine,
             };
 
+            let markdown_service = get(render_path_handler).with_state(state.clone());
+            let static_service = ServeDir::new(&watch_dir).fallback(markdown_service);
+
             let app = Router::new()
-                .route("/", get(|| async { Redirect::permanent("/index.html") }))
-                .route("/{*path}", get(render_path_handler))
+                // .route("/", get(|| async { Redirect::permanent("/index.html") }))
+                // .route("/{*path}", get(render_path_handler))
+                .fallback_service(static_service)
                 .with_state(state.clone())
                 .layer(tower_http::trace::TraceLayer::new_for_http())
                 .layer(livereload);
