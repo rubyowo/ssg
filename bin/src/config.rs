@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, Result};
 use lib::plugin::jsonfeed::FeedConfig;
 use serde::Deserialize;
 use std::fs;
@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use crate::glob::GlobCache;
 use crate::rhai_plugin::compile_rhai_dir;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum IgnoreMode {
+    #[default]
     Extend,
     Replace,
     Remove,
@@ -18,16 +19,23 @@ pub enum IgnoreMode {
 /// Config for building/serving the rendered files.
 #[derive(Clone, Debug, Deserialize)]
 pub struct BuildConfig {
+    #[serde(default = "default_ignore")]
     pub ignore: Option<Vec<String>>,
+    #[serde(default)]
     pub ignore_mode: Option<IgnoreMode>,
+    #[serde(default)]
     pub minify: Option<bool>,
+}
+
+fn default_ignore() -> Option<Vec<String>> {
+    Some(vec!["*.toml".to_string()])
 }
 
 impl Default for BuildConfig {
     fn default() -> Self {
         Self {
-            ignore: Some(vec!["*.toml".to_string()]),
-            ignore_mode: Some(IgnoreMode::Extend),
+            ignore: default_ignore(),
+            ignore_mode: Some(IgnoreMode::default()),
             minify: Some(false),
         }
     }
@@ -51,7 +59,6 @@ pub struct RhaiScript {
     pub ast: rhai::AST,
 }
 
-/// Config for the actual templates
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     pub templates: Option<PathBuf>,
@@ -64,30 +71,29 @@ pub struct Config {
     pub feed: Option<FeedConfig>,
 }
 
+#[hotpath::measure_all]
 impl Config {
-    pub fn new(toml: PathBuf) -> anyhow::Result<Self> {
-        let s = fs::read_to_string(&toml).with_context(|| format!("reading {}", toml.display()))?;
-        let cfg: TomlConfig =
-            toml::from_str(&s).with_context(|| format!("parsing {}", toml.display()))?;
+    pub fn new(toml: PathBuf) -> Result<Self> {
+        let s = fs::read_to_string(&toml)
+            .with_context(|| format!("reading {}", toml.display()))?;
+        let cfg: TomlConfig = toml::from_str(&s)
+            .with_context(|| format!("parsing {}", toml.display()))?;
 
-        let base_dir = toml.parent().unwrap_or(Path::new("."));
+        let base_dir = toml.parent().unwrap_or_else(|| Path::new("."));
 
-        let templates_resolved = cfg.templates.map(|t| {
+        let templates = cfg.templates.map(|t| {
             let p = PathBuf::from(t);
             if p.is_absolute() {
                 p
             } else {
-                let parent = base_dir.to_path_buf();
-                parent
-                    .join(&p)
+                base_dir.join(&p)
                     .canonicalize()
-                    .with_context(|| format!("reading {}", p.display()))
-                    .unwrap()
+                    .unwrap_or_else(|_| base_dir.join(p))
             }
         });
 
         Ok(Self {
-            templates: templates_resolved,
+            templates,
             template: cfg.template,
             highlighting_themes: cfg.highlighting_themes,
             build: cfg.build.unwrap_or_default(),
@@ -105,35 +111,28 @@ impl Config {
             (None, Some(c)) => c,
             (Some(parent), Some(mut local)) => {
                 local.build = merge_build_config(&parent.build, &local.build);
-
                 local.templates = local.templates.or_else(|| parent.templates.clone());
                 local.template = local.template.or_else(|| parent.template.clone());
-                local.highlighting_themes = local
-                    .highlighting_themes
-                    .or_else(|| parent.highlighting_themes.clone());
-
+                local.highlighting_themes = local.highlighting_themes.or_else(|| parent.highlighting_themes.clone());
                 local
             }
         }
     }
 
     pub fn is_ignored(&self, path: &Path, glob_cache: &mut GlobCache) -> bool {
-        match &self.build.ignore {
-            Some(patterns) => glob_cache.is_match(patterns, path).unwrap_or(false),
-            None => false,
-        }
+        self.build.ignore.as_ref()
+            .map_or(false, |patterns| glob_cache.is_match(patterns, path).unwrap_or(false))
     }
 }
 
+#[hotpath::measure]
 fn merge_build_config(parent: &BuildConfig, local: &BuildConfig) -> BuildConfig {
-    let mode = local
-        .ignore_mode
-        .clone()
+    let mode = local.ignore_mode.clone()
         .or_else(|| parent.ignore_mode.clone())
-        .unwrap_or(IgnoreMode::Extend);
+        .unwrap_or_default();
 
-    let parent_ignores = parent.ignore.clone().unwrap_or_default();
-    let local_ignores = local.ignore.clone().unwrap_or_default();
+    let parent_ignores = parent.ignore.as_ref().cloned().unwrap_or_default();
+    let local_ignores = local.ignore.as_ref().cloned().unwrap_or_default();
 
     let merged_ignore = match mode {
         IgnoreMode::Extend => {
@@ -149,11 +148,7 @@ fn merge_build_config(parent: &BuildConfig, local: &BuildConfig) -> BuildConfig 
     };
 
     BuildConfig {
-        ignore: if merged_ignore.is_empty() {
-            None
-        } else {
-            Some(merged_ignore)
-        },
+        ignore: if merged_ignore.is_empty() { None } else { Some(merged_ignore) },
         ignore_mode: Some(mode),
         minify: local.minify.or(parent.minify),
     }
@@ -164,7 +159,7 @@ pub fn load_overrides(
     md_path: &Path,
     watch_dir: &Path,
     parent: Option<&Config>,
-) -> anyhow::Result<Config> {
+) -> Result<Config> {
     let local = find_local_config(md_path, watch_dir)
         .map(Config::new)
         .transpose()?;
@@ -172,6 +167,7 @@ pub fn load_overrides(
     Ok(Config::merged(parent, local))
 }
 
+#[hotpath::measure]
 fn find_local_config(md_path: &Path, watch_dir: &Path) -> Option<PathBuf> {
     let dir = if md_path.is_dir() {
         md_path.canonicalize().ok()?
@@ -179,16 +175,13 @@ fn find_local_config(md_path: &Path, watch_dir: &Path) -> Option<PathBuf> {
         md_path.parent().unwrap_or(watch_dir).to_path_buf()
     };
 
-    // Page-specific override (foo.md → foo.toml)
-    if let Some(stem) = md_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| *s != "index.md")
-    {
-        let mut page = dir.join(stem);
-        page.set_extension(".toml");
-        if page.is_file() {
-            return Some(page);
+    // Page-specific override (foo.md -> foo.toml)
+    if let Some(stem) = md_path.file_stem().and_then(|s| s.to_str()) {
+        if stem != "index" {
+            let page = dir.join(stem).with_extension("toml");
+            if page.is_file() {
+                return Some(page);
+            }
         }
     }
 
