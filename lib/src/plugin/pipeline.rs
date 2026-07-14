@@ -11,6 +11,12 @@ pub struct GlobalPipeline {
     plugins: Vec<Box<dyn GlobalPlugin>>,
 }
 
+impl Default for GlobalPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalPipeline {
     pub fn new() -> Self {
         Self {
@@ -47,6 +53,12 @@ pub struct PluginPipeline {
     pub plugins: Vec<Box<dyn MarkdownPlugin>>,
 }
 
+impl Default for PluginPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PluginPipeline {
     pub fn new() -> Self {
         Self {
@@ -62,7 +74,7 @@ impl PluginPipeline {
         fn walk(node: &mut Node, plugins: &mut [Box<dyn MarkdownPlugin>]) {
             if let Some(current_kind) = NodeKind::from_node(node) {
                 for plugin in plugins.iter_mut() {
-                    if plugin.target_kind().map_or(true, |k| k == current_kind) {
+                    if plugin.target_kind().is_none_or(|k| k == current_kind) {
                         plugin.run(node);
                     }
                 }

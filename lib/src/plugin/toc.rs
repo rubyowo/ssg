@@ -27,7 +27,7 @@ pub fn toc_plugin(node: &mut Node, ctx: &mut TocContext) {
         }
 
         ctx.headings.push(TocItem {
-            level: heading.depth as u8,
+            level: heading.depth,
             text: text.clone(),
             id: text.to_lowercase().replace(" ", "-"),
         });

@@ -65,14 +65,14 @@ pub async fn render_path_handler(
                 let config = config.clone();
                 let rhai_engine = state.rhai_engine.clone();
                 tasks.push(tokio::spawn(async move {
-                    if let Ok(content) = tokio::fs::read_to_string(&f_path).await {
-                        if let Ok(page_ctx) = render_markdown(content, &config, rhai_engine).await {
-                            let relative = f_path
-                                .strip_prefix(&watch_dir)?
-                                .to_string_lossy()
-                                .to_string();
-                            return anyhow::Ok(Some((relative, page_ctx)));
-                        }
+                    if let Ok(content) = tokio::fs::read_to_string(&f_path).await
+                        && let Ok(page_ctx) = render_markdown(content, &config, rhai_engine).await
+                    {
+                        let relative = f_path
+                            .strip_prefix(&watch_dir)?
+                            .to_string_lossy()
+                            .to_string();
+                        return anyhow::Ok(Some((relative, page_ctx)));
                     }
                     anyhow::Ok(None)
                 }));

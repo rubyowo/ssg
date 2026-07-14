@@ -124,7 +124,7 @@ impl GlobalPlugin for JsonFeedPlugin {
             }
         }
 
-        items.sort_by(|a, b| b.0.cmp(&a.0));
+        items.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         for (_, item) in items {
             feed_builder = feed_builder.add_item(&item);

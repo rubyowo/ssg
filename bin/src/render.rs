@@ -64,7 +64,6 @@ pub async fn render_markdown(
     for script in &config.plugins {
         pipeline.register(RhaiPlugin::boxed(
             None,
-            script.name.clone(),
             script.ast.clone(),
             rhai_engine.clone(),
         ));
@@ -74,7 +73,7 @@ pub async fn render_markdown(
 
     let final_reading_time = match Arc::try_unwrap(reading_time_ctx) {
         Ok(mutex) => mutex.into_inner().unwrap_or_default(),
-        Err(arc) => arc.lock().map(|g| g.clone()).unwrap_or_default(),
+        Err(arc) => arc.lock().map(|g| *g).unwrap_or_default(),
     };
 
     let final_toc = match Arc::try_unwrap(toc_ctx) {
@@ -165,7 +164,7 @@ pub async fn render_or_copy_file(
     input_path: &Path,
     root_dir: &Path,
     output_dir: Option<&Path>,
-    default_templates: &PathBuf,
+    _default_templates: &PathBuf,
     default_template: &str,
     template_engine: &TemplateEngine,
     config: &Config,
@@ -176,11 +175,11 @@ pub async fn render_or_copy_file(
     rhai_engine: Arc<Engine>,
 ) -> Result<Option<(Vec<u8>, String)>> {
     debug!("Processing input path: {}", input_path.display());
-    if let Some(ignore) = config.build.ignore.as_ref() {
-        if glob_cache.is_match(&ignore, input_path).unwrap_or(false) {
-            debug!("Ignored path: {}", input_path.display());
-            return Ok(None);
-        }
+    if let Some(ignore) = config.build.ignore.as_ref()
+        && glob_cache.is_match(ignore, input_path).unwrap_or(false)
+    {
+        debug!("Ignored path: {}", input_path.display());
+        return Ok(None);
     }
 
     let out_path = output_dir
@@ -199,7 +198,7 @@ pub async fn render_or_copy_file(
     let mime = if is_markdown {
         "text/html".to_string()
     } else {
-        mime_guess::from_path(&input_path)
+        mime_guess::from_path(input_path)
             .first_or_octet_stream()
             .essence_str()
             .to_string()
@@ -216,14 +215,8 @@ pub async fn render_or_copy_file(
             }
         };
 
-        let mut rendered = render_tera(
-            ctx,
-            template_engine,
-            template,
-            &config,
-            global_context
-        )
-        .await?;
+        let mut rendered =
+            render_tera(ctx, template_engine, template, config, global_context).await?;
 
         if config.build.minify.unwrap_or(false) {
             let mut cfg = Cfg::new();
@@ -234,28 +227,24 @@ pub async fn render_or_copy_file(
             rendered = String::from_utf8(minified)?;
         }
 
-        if for_build {
-            if let Some(mut out) = out_path {
-                if let Some(parent) = out.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                out.set_extension("html");
-                tokio::fs::write(&out, &rendered).await?;
-                info!("Rendered {}", out.display());
+        if for_build && let Some(mut out) = out_path {
+            if let Some(parent) = out.parent() {
+                tokio::fs::create_dir_all(parent).await?;
             }
+            out.set_extension("html");
+            tokio::fs::write(&out, &rendered).await?;
+            info!("Rendered {}", out.display());
         }
 
         Ok(Some((rendered.into_bytes(), mime)))
     } else {
         let content = tokio::fs::read(input_path).await?;
-        if for_build {
-            if let Some(out) = out_path {
-                if let Some(parent) = out.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                tokio::fs::copy(input_path, &out).await?;
-                info!("Copied {}", out.display());
+        if for_build && let Some(out) = out_path {
+            if let Some(parent) = out.parent() {
+                tokio::fs::create_dir_all(parent).await?;
             }
+            tokio::fs::copy(input_path, &out).await?;
+            info!("Copied {}", out.display());
         }
         Ok(Some((content, mime)))
     }

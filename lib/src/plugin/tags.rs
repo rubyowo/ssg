@@ -19,7 +19,7 @@ impl GlobalPlugin for TagAggregatorPlugin {
     ) {
         let mut tag_counts: HashMap<String, usize> = HashMap::new();
 
-        for (_path, page) in all_pages {
+        for page in all_pages.values() {
             let fm = &page.frontmatter;
             if fm.draft {
                 continue;

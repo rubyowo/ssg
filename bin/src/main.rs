@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::{debug, error, info};
 use notify::Watcher;
@@ -124,7 +124,8 @@ async fn main() -> Result<()> {
             let global_context = generate_global_context(&rendered_pages, &root_config)?;
             write_json_feed(&output_dir, &root_config, &global_context)?;
 
-            let template_engine = create_tera(&templates, &root_config, &rhai_engine).expect("Failed to create templating engine");
+            let template_engine = create_tera(&templates, &root_config, &rhai_engine)
+                .expect("Failed to create templating engine");
 
             for path in files {
                 let relative_path = path.strip_prefix(&input_dir)?.to_string_lossy().to_string();
@@ -193,11 +194,12 @@ async fn main() -> Result<()> {
 
             let handle = tokio::runtime::Handle::current();
             let mut watcher = notify::recommended_watcher(move |ev: Result<notify::Event, _>| {
-                if let Ok(ev) = ev {
-                    if !ev.kind.is_access() {
-                        let state = state.clone();
-                        let reloader_clone = reloader.clone();
-                        handle.spawn(async move {
+                if let Ok(ev) = ev
+                    && !ev.kind.is_access()
+                {
+                    let state = state.clone();
+                    let reloader_clone = reloader.clone();
+                    handle.spawn(async move {
                             let abs_watch_dir = match std::fs::canonicalize(&state.watch_dir) {
                                 Ok(path) => path,
                                 Err(e) => {
@@ -207,8 +209,8 @@ async fn main() -> Result<()> {
                             };
 
                             for path in ev.paths {
-                                if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                                if path.extension().and_then(|s| s.to_str()) == Some("md")
+                                    && let Ok(content) = tokio::fs::read_to_string(&path).await {
                                         let root_config = match config::load_overrides(
                                             &path,
                                             &state.watch_dir,
@@ -256,12 +258,10 @@ async fn main() -> Result<()> {
                                             }
                                         }
                                     }
-                                }
                             }
 
                             reloader_clone.reload();
                         });
-                    }
                 };
             })?;
             watcher.watch(&watch_dir, notify::RecursiveMode::Recursive)?;

@@ -11,17 +11,15 @@ pub fn math_plugin(node: &mut Node) {
         if let Ok(latex) = LatexToMathML::new(MathCoreConfig {
             pretty_print: math_core::PrettyPrint::Always,
             ..Default::default()
-        }) {
-            if let Ok(res) =
-                latex.convert_with_local_state(&code.value, math_core::MathDisplay::Block)
-            {
-                let html = format!(
-                    "<pre><code class=\"language-math\">{}</code></pre>",
-                    res.mathml
-                );
+        }) && let Ok(res) =
+            latex.convert_with_local_state(&code.value, math_core::MathDisplay::Block)
+        {
+            let html = format!(
+                "<pre><code class=\"language-math\">{}</code></pre>",
+                res.mathml
+            );
 
-                node.replace_with_html(html);
-            }
+            node.replace_with_html(html);
         }
     } else if let Node::InlineMath(math) = node {
         let latex = LatexToMathML::default();
