@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::NodeExt;
 
-pub fn highlight_plugin(node: &mut Node, _ctx: &mut ()) {
+pub fn highlight_plugin(node: &mut Node) {
     if let Node::Code(code) = node {
         if let Some(lang) = code.lang.as_ref() {
             let mut hl = Highlighter::new();
@@ -26,5 +26,5 @@ pub fn highlight_plugin(node: &mut Node, _ctx: &mut ()) {
 #[derive(Serialize, Debug)]
 pub struct HighlighterThemeContext {
     pub themes: Vec<String>,
-    pub css: String
+    pub css: String,
 }

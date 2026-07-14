@@ -1,12 +1,24 @@
+pub mod math;
 pub mod pipeline;
 pub mod reading_time;
-pub mod toc;
 pub mod syntax_highlighting;
-pub mod math;
+pub mod toc;
+pub mod tags;
+pub mod jsonfeed;
+
+use std::collections::HashMap;
 
 use markdown::mdast::Node;
 
 pub use pipeline::*;
+
+use crate::PageContext;
+
+/// A plugin that processes the aggregated frontmatter of the entire site
+pub trait GlobalPlugin: Send + Sync {
+    fn name(&self) -> &str;
+    fn run(&mut self, all_pages: &HashMap<String, PageContext>, global_context: &mut HashMap<String, tera::Value>);
+}
 
 macro_rules! define_mdast_nodes {
     (
@@ -75,19 +87,32 @@ define_mdast_nodes! {
     ]
 }
 
-pub trait PluginContext {}
-
-#[derive(Copy)]
-pub struct Plugin<C> {
-    pub kind: NodeKind,
-    pub func: fn(&mut Node, &mut C),
+pub struct NativePlugin<F> {
+    kind: NodeKind,
+    func: F,
 }
 
-impl<C> Clone for Plugin<C> {
-    fn clone(&self) -> Self {
-        Plugin {
-            kind: self.kind,
-            func: self.func,
-        }
+impl<F> NativePlugin<F>
+where
+    F: FnMut(&mut Node) + Send + Sync,
+{
+    pub fn boxed(kind: NodeKind, func: F) -> Box<dyn MarkdownPlugin> 
+    where
+        Self: 'static
+    {
+        Box::new(Self { kind, func })
+    }
+}
+
+impl<F> MarkdownPlugin for NativePlugin<F>
+where
+    F: FnMut(&mut Node) + Send + Sync,
+{
+    fn target_kind(&self) -> Option<NodeKind> {
+        Some(self.kind)
+    }
+
+    fn run(&mut self, node: &mut Node) {
+        (self.func)(node);
     }
 }

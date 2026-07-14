@@ -1,22 +1,17 @@
 use markdown::mdast::Node;
 use serde::Serialize;
 
-use crate::plugin::PluginContext;
-
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct TocContext {
     pub headings: Vec<TocItem>,
 }
 
-impl PluginContext for TocContext {}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct TocItem {
     pub level: u8,
     pub text: String,
-    pub id: String
+    pub id: String,
 }
-
 
 pub fn toc_plugin(node: &mut Node, ctx: &mut TocContext) {
     if let Node::Heading(heading) = node {
@@ -34,7 +29,7 @@ pub fn toc_plugin(node: &mut Node, ctx: &mut TocContext) {
         ctx.headings.push(TocItem {
             level: heading.depth as u8,
             text: text.clone(),
-            id: text.to_lowercase().replace(" ", "-")
+            id: text.to_lowercase().replace(" ", "-"),
         });
     }
 }

@@ -28,10 +28,8 @@ impl GlobCache {
         if !self.sets.contains_key(&key) {
             let mut builder = GlobSetBuilder::new();
             for pat in key.iter() {
-                builder.add(
-                    Glob::new(pat)
-                        .with_context(|| format!("invalid glob pattern: {pat}"))?,
-                );
+                builder
+                    .add(Glob::new(pat).with_context(|| format!("invalid glob pattern: {pat}"))?);
             }
             let set = builder.build()?;
             self.sets.insert(key.clone(), set);

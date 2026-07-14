@@ -1,14 +1,11 @@
-use crate::plugin::PluginContext;
 use markdown::mdast::Node;
 use serde::Serialize;
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Copy, Default, Serialize, Debug)]
 pub struct ReadingTimeContext {
     pub word_count: usize,
     pub reading_time_minutes: usize,
 }
-
-impl PluginContext for ReadingTimeContext {}
 
 pub fn reading_time_plugin(node: &mut Node, ctx: &mut ReadingTimeContext) {
     if let Node::Text(t) = node {

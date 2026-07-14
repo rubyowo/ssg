@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Frontmatter {
     pub title: String,
+    pub description: Option<String>,
     pub date: Option<jiff::civil::Date>,
     pub tags: Option<Vec<String>>,
     pub draft: bool,

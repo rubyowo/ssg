@@ -1,80 +1,84 @@
+use std::collections::HashMap;
+
 use markdown::mdast::Node;
 
-use crate::plugin::{NodeKind, Plugin, children_mut};
+use crate::{PageContext, plugin::{GlobalPlugin, NativePlugin, NodeKind, children_mut}};
 
-pub struct PluginPipeline<C> {
-    by_kind: Vec<Vec<Plugin<C>>>,
-    pub context: C,
+pub struct GlobalPipeline {
+    plugins: Vec<Box<dyn GlobalPlugin>>,
 }
 
-impl<C: Default> PluginPipeline<C> {
+impl GlobalPipeline {
     pub fn new() -> Self {
-        Self {
-            by_kind: vec![Vec::new(); NodeKind::COUNT],
-            context: C::default(),
-        }
+        Self { plugins: Vec::new() }
     }
 
-    pub fn register(&mut self, plugin: Plugin<C>) {
-        self.by_kind[plugin.kind as usize].push(plugin);
+    pub fn register(&mut self, plugin: Box<dyn GlobalPlugin>) {
+        self.plugins.push(plugin);
     }
 
-    #[inline(always)]
-    pub fn run(&mut self, kind: NodeKind, node: &mut Node) {
-        for plugin in &self.by_kind[kind as usize] {
-            (plugin.func)(node, &mut self.context);
+    pub fn run(&mut self, all_pages: &HashMap<String, PageContext>) -> HashMap<String, tera::Value> {
+        let mut global_context = HashMap::new();
+        for plugin in &mut self.plugins {
+            // println!("Running global plugin: {}", plugin.name());
+            plugin.run(all_pages, &mut global_context);
         }
+        global_context
     }
 }
 
-pub trait PipelineTrait {
-    fn run(&mut self, kind: NodeKind, node: &mut Node);
+pub trait MarkdownPlugin: Send + Sync {
+    /// Specify which Node type this plugin transforms. 
+    /// Returns `None` if it should evaluate against every single node.
+    fn target_kind(&self) -> Option<NodeKind>;
+
+    fn run(&mut self, node: &mut Node);
 }
 
-impl<C> PipelineTrait for PluginPipeline<C> {
-    fn run(&mut self, kind: NodeKind, node: &mut Node) {
-        for plugin in &self.by_kind[kind as usize] {
-            (plugin.func)(node, &mut self.context);
-        }
+pub struct PluginPipeline {
+    pub plugins: Vec<Box<dyn MarkdownPlugin>>,
+}
+
+impl PluginPipeline {
+    pub fn new() -> Self {
+        Self { plugins: Vec::new() }
     }
-}
 
-pub fn run_pipelines(node: &mut Node, pipelines: &mut [&mut dyn PipelineTrait]) {
-    fn walk_node(node: &mut Node, pipelines: &mut [&mut dyn PipelineTrait]) {
-        if let Some(kind) = NodeKind::from_node(node) {
-            for pipeline in pipelines.iter_mut() {
-                pipeline.run(kind, node);
+    pub fn register(&mut self, plugin: Box<dyn MarkdownPlugin>) {
+        self.plugins.push(plugin);
+    }
+
+    pub fn run_on(&mut self, root: &mut Node) {
+        fn walk(node: &mut Node, plugins: &mut [Box<dyn MarkdownPlugin>]) {
+            if let Some(current_kind) = NodeKind::from_node(node) {
+                for plugin in plugins.iter_mut() {
+                    if plugin.target_kind().map_or(true, |k| k == current_kind) {
+                        plugin.run(node);
+                    }
+                }
+            }
+
+            if let Some(children) = children_mut(node) {
+                for child in children {
+                    walk(child, plugins);
+                }
             }
         }
 
-        if let Some(children) = children_mut(node) {
-            for child in children {
-                walk_node(child, pipelines);
-            }
-        }
+        walk(root, &mut self.plugins);
     }
-
-    walk_node(node, pipelines);
 }
 
-/// Macro to call `run_pipelines` with a list of pipelines and their contexts
-/// Example usage:
-/// ```rust
-/// run_pipelines!(
-///     &mut root_node,
-///     pipeline1,
-///     pipeline2,
-/// );
-/// ```
-#[macro_export]
-macro_rules! run_pipelines {
-    ($node:expr, $( $pipeline:expr ),+ $(,)? ) => {{
-        let mut pipelines: &mut [&mut dyn $crate::plugin::PipelineTrait] = &mut [
-            $(
-                &mut $pipeline,
-            )+
-        ];
+pub trait PipelineBuiltinsExt {
+    fn register_native<F>(&mut self, kind: NodeKind, func: F) where F: FnMut(&mut Node) + Send + Sync + 'static;
+}
 
-        $crate::plugin::run_pipelines($node, pipelines)
-    }};
+impl PipelineBuiltinsExt for PluginPipeline {
+    #[inline]
+    fn register_native<F>(&mut self, kind: NodeKind, func: F) 
+    where 
+        F: FnMut(&mut Node) + Send + Sync + 'static 
+    {
+        self.register(NativePlugin::boxed(kind, func));
+    }
 }
