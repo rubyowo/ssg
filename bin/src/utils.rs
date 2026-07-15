@@ -1,6 +1,6 @@
 use crate::tera::Value;
 use anyhow::Result;
-use log::error;
+use log::{debug, error};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,8 @@ pub fn collect_files(
     config: &RuntimeConfig,
     glob_cache: &mut GlobCache,
 ) -> Result<Vec<PathBuf>> {
+    debug!("running on folder: {}", root.display());
+
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
 
@@ -38,6 +40,7 @@ pub fn collect_files(
             match entry {
                 Ok(ent) => {
                     let path = ent.path();
+                    debug!("path: {}", path.display());
                     if config.is_ignored(&path, glob_cache) {
                         continue;
                     }

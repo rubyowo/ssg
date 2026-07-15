@@ -32,6 +32,7 @@ rhai = { version = "1.25", features = ["serde", "sync"] }
 futures = "0.3.32"
 hotpath = {version = "0.21", features = ["tokio"] }
 percent-encoding = "2.3.2"
+dynosaur = "0.3.1"
 
 [features]
 hotpath = ["hotpath/hotpath"]

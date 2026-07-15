@@ -11,6 +11,7 @@ use tower_livereload::LiveReloadLayer;
 
 mod config;
 mod glob;
+mod postprocessing;
 mod render;
 mod rhai_plugin;
 mod utils;
@@ -23,6 +24,7 @@ use lib::tera;
 use crate::{
     config::Config,
     glob::GlobCache,
+    postprocessing::pipeline::PostprocessPipeline,
     render::{create_tera, render_markdown, render_or_copy_file},
     utils::{collect_files, generate_global_context, write_json_feed},
     web::{WebState, render_path_handler},
@@ -144,6 +146,9 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
+
+            let pipeline = PostprocessPipeline::new(&config);
+            pipeline.run(&output_dir, &config, &mut glob_cache).await?;
 
             Ok(())
         }

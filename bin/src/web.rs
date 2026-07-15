@@ -161,20 +161,6 @@ pub async fn render_path_handler(
     Ok(create_response(Body::from(body), mime))
 }
 
-fn respond_with_mime(filename: &str, body: String) -> Response {
-    let clean_filename = filename.strip_suffix(".tera").unwrap_or(filename);
-
-    let mime = if !clean_filename.contains('.') {
-        "text/html; charset=utf-8".to_string()
-    } else {
-        mime_guess::from_path(clean_filename)
-            .first_or_text_plain()
-            .to_string()
-    };
-
-    create_response(Body::from(body), mime)
-}
-
 fn create_response(body: Body, mime: String) -> Response {
     let mut headers = HeaderMap::new();
     if let Ok(header_val) = HeaderValue::from_str(&mime) {

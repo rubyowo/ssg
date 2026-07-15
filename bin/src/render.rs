@@ -14,7 +14,6 @@ use lib::{
     render, render_template, tera, to_ast,
 };
 use log::{debug, info, warn};
-use minify_html::{Cfg, minify};
 use rhai::Engine;
 
 use crate::{
@@ -220,20 +219,11 @@ pub async fn render_or_copy_file(
                 }
             };
 
-            let mut rendered =
+            let rendered =
                 render_tera(Some(ctx), template_engine, template, config, global_context).await?;
 
-            if for_build {
-                if config.build.minify.unwrap_or(false) {
-                    let mut cfg = Cfg::new();
-                    cfg.enable_possibly_noncompliant();
-                    cfg.minify_css = true;
-                    cfg.minify_js = true;
-                    let minified = minify(rendered.as_bytes(), &cfg);
-                    rendered = String::from_utf8(minified)?;
-                }
-
-                if let Some(mut out) = out_path {
+            if for_build
+                && let Some(mut out) = out_path {
                     if let Some(parent) = out.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -241,7 +231,6 @@ pub async fn render_or_copy_file(
                     tokio::fs::write(&out, &rendered).await?;
                     info!("Rendered {}", out.display());
                 }
-            }
 
             Ok(Some((rendered.into_bytes(), mime)))
         }
@@ -257,7 +246,7 @@ pub async fn render_or_copy_file(
                 .to_string_lossy()
                 .to_string();
 
-            let mut rendered = render_tera(
+            let rendered = render_tera(
                 None,
                 template_engine,
                 &template_name,
@@ -266,17 +255,8 @@ pub async fn render_or_copy_file(
             )
             .await?;
 
-            if for_build {
-                if config.build.minify.unwrap_or(false) && mime == "text/html" {
-                    let mut cfg = Cfg::new();
-                    cfg.enable_possibly_noncompliant();
-                    cfg.minify_css = true;
-                    cfg.minify_js = true;
-                    let minified = minify(rendered.as_bytes(), &cfg);
-                    rendered = String::from_utf8(minified)?;
-                }
-
-                if let Some(mut out) = out_path {
+            if for_build
+                && let Some(mut out) = out_path {
                     if let Some(parent) = out.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -291,7 +271,6 @@ pub async fn render_or_copy_file(
                     tokio::fs::write(&out, &rendered).await?;
                     info!("Rendered {}", out.display());
                 }
-            }
 
             Ok(Some((rendered.into_bytes(), mime)))
         }
