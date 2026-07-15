@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
+use crate::config::RuntimeConfig;
 use crate::glob::GlobCache;
 use lib::{
     PageContext,
@@ -15,7 +15,7 @@ use lib::{
 /// Recursively collects files, skipping those that match patterns in the Config.
 pub fn collect_files(
     root: &Path,
-    config: &Config,
+    config: &RuntimeConfig,
     glob_cache: &mut GlobCache,
 ) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
@@ -58,7 +58,7 @@ pub fn collect_files(
 
 pub fn generate_global_context(
     rendered_pages: &HashMap<String, PageContext>,
-    config: &Config,
+    config: &RuntimeConfig,
 ) -> Result<HashMap<String, Value>> {
     let mut global_pipeline = GlobalPipeline::new();
     global_pipeline.register(Box::new(plugin::tags::TagAggregatorPlugin));
@@ -72,7 +72,7 @@ pub fn generate_global_context(
 
 pub fn write_json_feed(
     output_dir: &Path,
-    config: &Config,
+    config: &RuntimeConfig,
     global_context: &HashMap<String, Value>,
 ) -> Result<()> {
     if let Some(feed_value) = global_context.get("json_feed") {
@@ -89,4 +89,19 @@ pub fn write_json_feed(
         log::info!("Generated JSON Feed at {}", target_path.display());
     }
     Ok(())
+}
+
+pub fn resolve_path<T>(dir: Option<T>, base_dir: &Path) -> Option<PathBuf>
+where
+    T: AsRef<Path>,
+{
+    dir.map(|t| {
+        let p = t.as_ref();
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            let joined = base_dir.join(p);
+            joined.canonicalize().unwrap_or(joined)
+        }
+    })
 }

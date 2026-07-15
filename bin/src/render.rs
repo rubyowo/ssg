@@ -18,7 +18,7 @@ use minify_html::{Cfg, minify};
 use rhai::Engine;
 
 use crate::{
-    config::Config,
+    config::RuntimeConfig,
     glob::GlobCache,
     rhai_plugin::{RhaiPlugin, register_rhai_filter, register_rhai_function},
 };
@@ -26,7 +26,7 @@ use crate::{
 #[hotpath::measure]
 pub async fn render_markdown(
     content: String,
-    config: &Config,
+    config: &RuntimeConfig,
     rhai_engine: Arc<Engine>,
 ) -> Result<PageContext> {
     let (frontmatter, md_content) =
@@ -93,15 +93,14 @@ pub async fn render_markdown(
 
 #[hotpath::measure]
 pub fn create_tera(
-    templates: &PathBuf,
-    config: &Config,
+    config: &RuntimeConfig,
     rhai_engine: &Arc<Engine>,
 ) -> anyhow::Result<TemplateEngine> {
     let custom_filters = config.filters.clone();
     let custom_functions = config.functions.clone();
 
     let engine_clone = rhai_engine.clone();
-    TemplateEngine::new(templates, move |tera| {
+    TemplateEngine::new(&config.layouts, move |tera| {
         for filter in &custom_filters {
             register_rhai_filter(tera, engine_clone.clone(), filter);
         }
@@ -116,10 +115,10 @@ pub fn create_tera(
 
 #[hotpath::measure]
 pub async fn render_tera(
-    page_context: &PageContext,
+    page_context: Option<&PageContext>,
     template_engine: &TemplateEngine,
     template_name: &str,
-    config: &Config,
+    config: &RuntimeConfig,
     global_context: &HashMap<String, tera::Value>,
 ) -> Result<String> {
     let themes: Vec<String> = config
@@ -164,10 +163,8 @@ pub async fn render_or_copy_file(
     input_path: &Path,
     root_dir: &Path,
     output_dir: Option<&Path>,
-    _default_templates: &PathBuf,
-    default_template: &str,
     template_engine: &TemplateEngine,
-    config: &Config,
+    config: &RuntimeConfig,
     page_context: Option<&PageContext>,
     global_context: &HashMap<String, tera::Value>,
     glob_cache: &mut GlobCache,
@@ -194,60 +191,120 @@ pub async fn render_or_copy_file(
             Ok(out.join(relative))
         })
         .transpose()?;
-    let is_markdown = input_path.extension().and_then(|s| s.to_str()) == Some("md");
-    let mime = if is_markdown {
+    let extension = input_path.extension().and_then(|s| s.to_str());
+    let mime = if extension == Some("md") {
         "text/html".to_string()
     } else {
-        mime_guess::from_path(input_path)
+        // Strip .tera to guess MIME of target
+        let guess_path = if extension == Some("tera") {
+            input_path.with_extension("")
+        } else {
+            input_path.to_path_buf()
+        };
+
+        mime_guess::from_path(guess_path)
             .first_or_octet_stream()
             .essence_str()
             .to_string()
     };
 
-    if is_markdown {
-        let template = config.template.as_ref().map_or(default_template, |v| v);
+    match extension {
+        Some("md") => {
+            let template = &config.template;
 
-        let ctx = match page_context {
-            Some(c) => c,
-            None => {
-                let content = tokio::fs::read_to_string(input_path).await?;
-                &render_markdown(content, config, rhai_engine.clone()).await?
+            let ctx = match page_context {
+                Some(c) => c,
+                None => {
+                    let content = tokio::fs::read_to_string(input_path).await?;
+                    &render_markdown(content, config, rhai_engine.clone()).await?
+                }
+            };
+
+            let mut rendered =
+                render_tera(Some(ctx), template_engine, template, config, global_context).await?;
+
+            if for_build {
+                if config.build.minify.unwrap_or(false) {
+                    let mut cfg = Cfg::new();
+                    cfg.enable_possibly_noncompliant();
+                    cfg.minify_css = true;
+                    cfg.minify_js = true;
+                    let minified = minify(rendered.as_bytes(), &cfg);
+                    rendered = String::from_utf8(minified)?;
+                }
+
+                if let Some(mut out) = out_path {
+                    if let Some(parent) = out.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    out.set_extension("html");
+                    tokio::fs::write(&out, &rendered).await?;
+                    info!("Rendered {}", out.display());
+                }
             }
-        };
 
-        let mut rendered =
-            render_tera(ctx, template_engine, template, config, global_context).await?;
+            Ok(Some((rendered.into_bytes(), mime)))
+        }
+        Some("tera") => {
+            let template_name = input_path
+                .strip_prefix(root_dir)
+                .with_context(|| {
+                    format!(
+                        "Failed to resolve template name from path: {}",
+                        input_path.display()
+                    )
+                })?
+                .to_string_lossy()
+                .to_string();
 
-        if for_build {
-            if config.build.minify.unwrap_or(false) {
-                let mut cfg = Cfg::new();
-                cfg.enable_possibly_noncompliant();
-                cfg.minify_css = true;
-                cfg.minify_js = true;
-                let minified = minify(rendered.as_bytes(), &cfg);
-                rendered = String::from_utf8(minified)?;
+            let mut rendered = render_tera(
+                None,
+                template_engine,
+                &template_name,
+                config,
+                global_context,
+            )
+            .await?;
+
+            if for_build {
+                if config.build.minify.unwrap_or(false) && mime == "text/html" {
+                    let mut cfg = Cfg::new();
+                    cfg.enable_possibly_noncompliant();
+                    cfg.minify_css = true;
+                    cfg.minify_js = true;
+                    let minified = minify(rendered.as_bytes(), &cfg);
+                    rendered = String::from_utf8(minified)?;
+                }
+
+                if let Some(mut out) = out_path {
+                    if let Some(parent) = out.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+
+                    let out_filename = out.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    if let Some(stripped_name) =
+                        out_filename.strip_suffix(".tera").map(|s| s.to_string())
+                    {
+                        out.set_file_name(stripped_name);
+                    }
+
+                    tokio::fs::write(&out, &rendered).await?;
+                    info!("Rendered {}", out.display());
+                }
             }
 
-            if let Some(mut out) = out_path {
+            Ok(Some((rendered.into_bytes(), mime)))
+        }
+        _ => {
+            let content = tokio::fs::read(input_path).await?;
+            if for_build && let Some(out) = out_path {
                 if let Some(parent) = out.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
-                out.set_extension("html");
-                tokio::fs::write(&out, &rendered).await?;
-                info!("Rendered {}", out.display());
+                tokio::fs::copy(input_path, &out).await?;
+                info!("Copied {}", out.display());
             }
+            Ok(Some((content, mime)))
         }
-
-        Ok(Some((rendered.into_bytes(), mime)))
-    } else {
-        let content = tokio::fs::read(input_path).await?;
-        if for_build && let Some(out) = out_path {
-            if let Some(parent) = out.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::copy(input_path, &out).await?;
-            info!("Copied {}", out.display());
-        }
-        Ok(Some((content, mime)))
     }
 }

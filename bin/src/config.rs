@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::glob::GlobCache;
 use crate::rhai_plugin::compile_rhai_dir;
+use crate::utils::resolve_path;
 
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -18,23 +19,19 @@ pub enum IgnoreMode {
 
 /// Config for building/serving the rendered files.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct BuildConfig {
-    #[serde(default = "default_ignore")]
+    pub output_dir: Option<PathBuf>,
     pub ignore: Option<Vec<String>>,
-    #[serde(default)]
     pub ignore_mode: Option<IgnoreMode>,
-    #[serde(default)]
     pub minify: Option<bool>,
-}
-
-fn default_ignore() -> Option<Vec<String>> {
-    Some(vec!["*.toml".to_string()])
 }
 
 impl Default for BuildConfig {
     fn default() -> Self {
         Self {
-            ignore: default_ignore(),
+            output_dir: Some("out".to_owned().into()),
+            ignore: Some(vec!["*.toml".to_string()]),
             ignore_mode: Some(IgnoreMode::default()),
             minify: Some(false),
         }
@@ -43,7 +40,7 @@ impl Default for BuildConfig {
 
 #[derive(Deserialize)]
 pub struct TomlConfig {
-    pub templates: Option<String>,
+    pub layouts: Option<String>,
     pub template: Option<String>,
     pub highlighting_themes: Option<Vec<String>>,
     pub build: Option<BuildConfig>,
@@ -61,7 +58,7 @@ pub struct RhaiScript {
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
-    pub templates: Option<PathBuf>,
+    pub layouts: Option<PathBuf>,
     pub template: Option<String>,
     pub highlighting_themes: Option<Vec<String>>,
     pub build: BuildConfig,
@@ -74,29 +71,21 @@ pub struct Config {
 #[hotpath::measure_all]
 impl Config {
     pub fn new(toml: PathBuf) -> Result<Self> {
-        let s = fs::read_to_string(&toml)
-            .with_context(|| format!("reading {}", toml.display()))?;
-        let cfg: TomlConfig = toml::from_str(&s)
-            .with_context(|| format!("parsing {}", toml.display()))?;
+        let s = fs::read_to_string(&toml).with_context(|| format!("reading {}", toml.display()))?;
+        let cfg: TomlConfig =
+            toml::from_str(&s).with_context(|| format!("parsing {}", toml.display()))?;
 
         let base_dir = toml.parent().unwrap_or_else(|| Path::new("."));
 
-        let templates = cfg.templates.map(|t| {
-            let p = PathBuf::from(t);
-            if p.is_absolute() {
-                p
-            } else {
-                base_dir.join(&p)
-                    .canonicalize()
-                    .unwrap_or_else(|_| base_dir.join(p))
-            }
-        });
+        let layouts = resolve_path(cfg.layouts, base_dir);
+        let mut build = cfg.build.unwrap_or_default();
+        build.output_dir = resolve_path(build.output_dir, base_dir);
 
         Ok(Self {
-            templates,
+            layouts,
             template: cfg.template,
             highlighting_themes: cfg.highlighting_themes,
-            build: cfg.build.unwrap_or_default(),
+            build,
             plugins: compile_rhai_dir(cfg.plugins_dir, base_dir),
             filters: compile_rhai_dir(cfg.filters_dir, base_dir),
             functions: compile_rhai_dir(cfg.functions_dir, base_dir),
@@ -104,30 +93,46 @@ impl Config {
         })
     }
 
-    pub fn merged(parent: Option<&Config>, local: Option<Config>) -> Config {
-        match (parent, local) {
+    pub fn merged(parent: Option<Config>, local: Option<Config>, cli: Option<Config>) -> Config {
+        let cli_local = match (cli, local) {
             (None, None) => Config::default(),
-            (Some(p), None) => p.clone(),
-            (None, Some(c)) => c,
-            (Some(parent), Some(mut local)) => {
-                local.build = merge_build_config(&parent.build, &local.build);
-                local.templates = local.templates.or_else(|| parent.templates.clone());
-                local.template = local.template.or_else(|| parent.template.clone());
-                local.highlighting_themes = local.highlighting_themes.or_else(|| parent.highlighting_themes.clone());
+            (Some(c), None) => c,
+            (None, Some(l)) => l,
+            (Some(cli), Some(mut local)) => {
+                local.build = merge_build_config(&cli.build, &local.build);
+                local.layouts = cli.layouts.clone().or(local.layouts);
+                local.template = cli.template.clone().or(local.template);
+                local.highlighting_themes = cli
+                    .highlighting_themes
+                    .clone()
+                    .or(local.highlighting_themes);
+                local.feed = cli.feed.clone().or(local.feed);
                 local
             }
-        }
-    }
+        };
 
-    pub fn is_ignored(&self, path: &Path, glob_cache: &mut GlobCache) -> bool {
-        self.build.ignore.as_ref()
-            .map_or(false, |patterns| glob_cache.is_match(patterns, path).unwrap_or(false))
+        match (parent, Some(cli_local)) {
+            (None, Some(cl)) => cl,
+            (Some(p), Some(mut cl)) => {
+                cl.build = merge_build_config(&p.build, &cl.build);
+                cl.layouts = cl.layouts.or_else(|| p.layouts.clone());
+                cl.template = cl.template.or_else(|| p.template.clone());
+                cl.highlighting_themes = cl
+                    .highlighting_themes
+                    .or_else(|| p.highlighting_themes.clone());
+                cl.feed = cl.feed.or_else(|| p.feed.clone());
+                cl
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
 #[hotpath::measure]
 fn merge_build_config(parent: &BuildConfig, local: &BuildConfig) -> BuildConfig {
-    let mode = local.ignore_mode.clone()
+    let mode = local
+        .ignore_mode
+        .clone()
         .or_else(|| parent.ignore_mode.clone())
         .unwrap_or_default();
 
@@ -148,7 +153,16 @@ fn merge_build_config(parent: &BuildConfig, local: &BuildConfig) -> BuildConfig 
     };
 
     BuildConfig {
-        ignore: if merged_ignore.is_empty() { None } else { Some(merged_ignore) },
+        output_dir: local
+            .output_dir
+            .as_ref()
+            .or(parent.output_dir.as_ref())
+            .cloned(),
+        ignore: if merged_ignore.is_empty() {
+            None
+        } else {
+            Some(merged_ignore)
+        },
         ignore_mode: Some(mode),
         minify: local.minify.or(parent.minify),
     }
@@ -158,13 +172,18 @@ fn merge_build_config(parent: &BuildConfig, local: &BuildConfig) -> BuildConfig 
 pub fn load_overrides(
     md_path: &Path,
     watch_dir: &Path,
-    parent: Option<&Config>,
-) -> Result<Config> {
+    parent: Option<Config>,
+    cli: Option<Config>,
+) -> Result<RuntimeConfig> {
     let local = find_local_config(md_path, watch_dir)
         .map(Config::new)
         .transpose()?;
 
-    Ok(Config::merged(parent, local))
+    let merged = Config::merged(parent, local, cli);
+
+    let runtime_config = RuntimeConfig::try_from(merged)?;
+
+    Ok(runtime_config)
 }
 
 #[hotpath::measure]
@@ -176,12 +195,12 @@ fn find_local_config(md_path: &Path, watch_dir: &Path) -> Option<PathBuf> {
     };
 
     // Page-specific override (foo.md -> foo.toml)
-    if let Some(stem) = md_path.file_stem().and_then(|s| s.to_str()) {
-        if stem != "index" {
-            let page = dir.join(stem).with_extension("toml");
-            if page.is_file() {
-                return Some(page);
-            }
+    if let Some(stem) = md_path.file_stem().and_then(|s| s.to_str())
+        && stem != "index"
+    {
+        let page = dir.join(stem).with_extension("toml");
+        if page.is_file() {
+            return Some(page);
         }
     }
 
@@ -192,4 +211,66 @@ fn find_local_config(md_path: &Path, watch_dir: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeConfig {
+    pub layouts: PathBuf,
+    pub template: String,
+    pub highlighting_themes: Option<Vec<String>>,
+    pub build: BuildConfig,
+    pub plugins: Vec<RhaiScript>,
+    pub filters: Vec<RhaiScript>,
+    pub functions: Vec<RhaiScript>,
+    pub feed: Option<FeedConfig>,
+}
+
+impl RuntimeConfig {
+    pub fn is_ignored(&self, path: &Path, glob_cache: &mut GlobCache) -> bool {
+        let absolute_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+        self.build.ignore.as_ref().is_some_and(|patterns| {
+            glob_cache
+                .is_match(patterns, &absolute_path)
+                .unwrap_or(false)
+        })
+    }
+}
+
+impl TryFrom<Config> for RuntimeConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(cfg: Config) -> Result<Self, Self::Error> {
+        let layouts = cfg.layouts.ok_or_else(|| {
+            anyhow::anyhow!("Configuration Error: `layouts` directory is not defined.")
+        })?;
+
+        let template = cfg.template.ok_or_else(|| {
+            anyhow::anyhow!("Configuration Error: default `template` is not defined.")
+        })?;
+
+        let mut build = cfg.build;
+        let mut ignore = build.ignore.unwrap();
+        ignore.push(format!("{}/**/*.tera", layouts.to_str().unwrap()));
+        ignore.push(format!(
+            "{}/**",
+            build
+                .output_dir
+                .as_ref()
+                .and_then(|dir| dir.to_str())
+                .unwrap()
+        ));
+        build.ignore = Some(ignore);
+
+        Ok(Self {
+            layouts,
+            template,
+            highlighting_themes: cfg.highlighting_themes,
+            build,
+            plugins: cfg.plugins,
+            filters: cfg.filters,
+            functions: cfg.functions,
+            feed: cfg.feed,
+        })
+    }
 }

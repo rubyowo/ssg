@@ -3,11 +3,11 @@ use tera::Tera;
 
 #[derive(Clone)]
 pub struct TemplateEngine {
-    tera: Tera,
+    pub tera: Tera,
 }
 
 impl TemplateEngine {
-    pub fn new<P, F>(template_dir: P, custom_config: F) -> anyhow::Result<Self>
+    pub fn new<P, F>(layouts_dir: P, custom_config: F) -> anyhow::Result<Self>
     where
         P: AsRef<std::path::Path>,
         F: FnOnce(&mut Tera) -> anyhow::Result<()>,
@@ -31,7 +31,11 @@ impl TemplateEngine {
 
         custom_config(&mut tera).with_context(|| "Failed running custom engine configuration")?;
 
-        tera.load_from_glob(&format!("{}/**/*", template_dir.as_ref().to_str().unwrap()))?;
+        // Load layout templates first
+        tera.load_from_glob(&format!("{}/**/*.tera", layouts_dir.as_ref().to_str().unwrap()))?;
+
+        // Then load every other template
+        tera.load_from_glob("./**/*.tera")?;
         tera.autoescape_on(Vec::<&str>::new());
         Ok(Self { tera })
     }
@@ -40,6 +44,16 @@ impl TemplateEngine {
         self.tera
             .render(template, &ctx)
             .with_context(|| format!("Failed to render template: {}", template))
+    }
+
+    pub fn reload_templates(&mut self) -> anyhow::Result<()> {
+        // println!("Reloading templates");
+        Ok(self.tera.full_reload()?)
+    }
+
+    pub fn check_template_exists(&self, template_name: &str) -> bool {
+        let names: Vec<_> = self.tera.get_template_names().collect();
+        names.contains(&template_name)
     }
 }
 

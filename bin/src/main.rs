@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 use log::{debug, error, info};
 use notify::Watcher;
 use rhai::Engine;
-use tower_http::services::ServeDir;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use tower_http::services::ServeDir;
 
 use tokio::sync::Mutex;
 use tower_livereload::LiveReloadLayer;
@@ -16,7 +16,7 @@ mod rhai_plugin;
 mod utils;
 mod web;
 
-use axum::{Router, response::Redirect, routing::get};
+use axum::{Router, routing::get};
 
 use lib::tera;
 
@@ -41,18 +41,13 @@ enum Commands {
         input_dir: PathBuf,
         #[arg(short, long, default_value = "out")]
         output_dir: PathBuf,
-        #[arg(short = 'T', long, default_value = "templates")]
-        templates: PathBuf,
-        #[arg(short, long, default_value = "index.tera")]
-        template: String,
+        #[arg(short, long)]
+        template: Option<String>,
     },
     Serve {
         #[arg(default_value = ".")]
         watch_dir: PathBuf,
-        #[arg(short = 'T', long, default_value = "templates")]
-        templates: PathBuf,
-        #[arg(short, long, default_value = "index.tera")]
-        template: String,
+        template: Option<String>,
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value = "3000")]
@@ -73,7 +68,6 @@ async fn main() -> Result<()> {
         Commands::Build {
             input_dir,
             output_dir,
-            templates,
             template,
         } => {
             if !input_dir.is_dir() {
@@ -81,32 +75,34 @@ async fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("input path is not a directory"));
             }
             tokio::fs::create_dir_all(&output_dir).await?;
-            let root_config = config::load_overrides(
+            let config = config::load_overrides(
                 &input_dir,
                 &input_dir,
-                Some(&Config {
-                    templates: Some(templates.clone()),
-                    template: Some(template.clone()),
+                None,
+                Some(Config {
+                    template,
                     ..Default::default()
                 }),
             )?;
 
+            info!("{:#?}", config);
+
             let mut rendered_pages = HashMap::new();
             let rhai_engine = Arc::new(Engine::new());
 
-            let files = collect_files(&input_dir, &root_config, &mut glob_cache)?;
+            let files = collect_files(&input_dir, &config, &mut glob_cache)?;
 
             let mut tasks = Vec::new();
             for path in &files {
                 if path.extension().and_then(|s| s.to_str()) == Some("md") {
                     let path = path.clone();
                     let input_dir = input_dir.clone();
-                    let root_config = root_config.clone();
+                    let config = config.clone();
                     let rhai_engine = rhai_engine.clone();
 
                     tasks.push(tokio::spawn(async move {
                         let content = std::fs::read_to_string(&path)?;
-                        let page_ctx = render_markdown(content, &root_config, rhai_engine).await?;
+                        let page_ctx = render_markdown(content, &config, rhai_engine).await?;
                         let relative_path =
                             path.strip_prefix(&input_dir)?.to_string_lossy().to_string();
                         anyhow::Ok((relative_path, page_ctx))
@@ -124,11 +120,11 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let global_context = generate_global_context(&rendered_pages, &root_config)?;
-            write_json_feed(&output_dir, &root_config, &global_context)?;
+            let global_context = generate_global_context(&rendered_pages, &config)?;
+            write_json_feed(&output_dir, &config, &global_context)?;
 
-            let template_engine = create_tera(&templates, &root_config, &rhai_engine)
-                .expect("Failed to create templating engine");
+            let template_engine =
+                create_tera(&config, &rhai_engine).expect("Failed to create templating engine");
 
             for path in files {
                 let relative_path = path.strip_prefix(&input_dir)?.to_string_lossy().to_string();
@@ -138,10 +134,8 @@ async fn main() -> Result<()> {
                     &path,
                     &input_dir,
                     Some(&output_dir),
-                    &templates,
-                    &template,
                     &template_engine,
-                    &root_config,
+                    &config,
                     page_ctx,
                     &global_context,
                     &mut glob_cache,
@@ -156,7 +150,6 @@ async fn main() -> Result<()> {
 
         Commands::Serve {
             watch_dir,
-            templates,
             template,
             host,
             port,
@@ -164,22 +157,23 @@ async fn main() -> Result<()> {
             let livereload = LiveReloadLayer::new();
             let reloader = livereload.reloader();
 
-            let root_config = config::load_overrides(
+            let config = config::load_overrides(
                 &watch_dir,
                 &watch_dir,
-                Some(&Config {
-                    templates: Some(templates.clone()),
-                    template: Some(template.clone()),
+                None,
+                Some(Config {
+                    template,
                     ..Default::default()
                 }),
             )?;
 
             let rhai_engine = Arc::new(Engine::new());
-            let template_engine = create_tera(&templates, &root_config, &rhai_engine.clone())?;
+            let template_engine = Arc::new(tokio::sync::RwLock::new(create_tera(
+                &config,
+                &rhai_engine.clone(),
+            )?));
 
             let state = WebState {
-                templates: templates.clone(),
-                template,
                 template_engine,
                 watch_dir: watch_dir.clone(),
                 glob_cache: Arc::new(Mutex::new(GlobCache::default())),
@@ -204,7 +198,7 @@ async fn main() -> Result<()> {
                 if let Ok(ev) = ev
                     && !ev.kind.is_access()
                 {
-                    let state = state.clone();
+                    let mut state = state.clone();
                     let reloader_clone = reloader.clone();
                     handle.spawn(async move {
                             let abs_watch_dir = match std::fs::canonicalize(&state.watch_dir) {
@@ -252,7 +246,7 @@ async fn main() -> Result<()> {
                                         let root_config = match config::load_overrides(
                                             &path,
                                             &state.watch_dir,
-                                            None,
+                                            None, None
                                         ) {
                                             Ok(cfg) => cfg,
                                             Err(_) => continue,
@@ -304,7 +298,6 @@ async fn main() -> Result<()> {
                 };
             })?;
             watcher.watch(&watch_dir, notify::RecursiveMode::Recursive)?;
-            watcher.watch(&templates, notify::RecursiveMode::Recursive)?;
 
             let addr = format!("{}:{}", host, port);
             info!("listening on http://{}", addr);
